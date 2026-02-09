@@ -53,7 +53,6 @@ class VideoService:
         user_agent = get_config("security.user_agent")
         headers = {
             "Accept": "*/*",
-            "Accept-Encoding": "gzip, deflate, br, zstd",
             "Accept-Language": "zh-CN,zh;q=0.9",
             "Baggage": "sentry-environment=production,sentry-release=d6add6fb0460641fd482d767a335ef72b9b6abb8,sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c",
             "Cache-Control": "no-cache",
