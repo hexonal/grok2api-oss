@@ -200,25 +200,24 @@ class BaseService:
     @staticmethod
     async def fetch(url: str) -> Tuple[str, str, str]:
         """获取远程资源并转 Base64"""
+        import aiohttp as _aiohttp
+
         try:
-            async with AsyncSession() as session:
-                response = await session.get(
-                    url, timeout=10, headers={"Accept-Encoding": "identity"}
-                )
-                if response.status_code >= 400:
-                    raise UpstreamException(
-                        message=f"Failed to fetch: {response.status_code}",
-                        details={"url": url, "status": response.status_code},
-                    )
-
-                filename = url.split("/")[-1].split("?")[0] or "download"
-                content_type = response.headers.get(
-                    "content-type", "application/octet-stream"
-                ).split(";")[0]
-                b64 = base64.b64encode(response.content).decode()
-
-                logger.debug(f"Fetched: {url}")
-                return filename, b64, content_type
+            async with _aiohttp.ClientSession(auto_decompress=False) as session:
+                async with session.get(url, timeout=_aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status >= 400:
+                        raise UpstreamException(
+                            message=f"Failed to fetch: {resp.status}",
+                            details={"url": url, "status": resp.status},
+                        )
+                    data = await resp.read()
+                    filename = url.split("/")[-1].split("?")[0] or "download"
+                    content_type = resp.headers.get(
+                        "content-type", "application/octet-stream"
+                    ).split(";")[0]
+                    b64 = base64.b64encode(data).decode()
+                    logger.debug(f"Fetched: {url}")
+                    return filename, b64, content_type
         except Exception as e:
             if isinstance(e, AppException):
                 raise
