@@ -62,6 +62,7 @@ class OssService:
                     Key=object_key,
                     Body=data,
                     ContentType=content_type,
+                    ContentEncoding="identity",
                 )
             url = self.get_public_url(object_key)
             logger.info(f"OSS upload ok: {object_key}")
