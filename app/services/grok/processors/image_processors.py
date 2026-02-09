@@ -197,12 +197,19 @@ class ImageCollectProcessor(BaseProcessor):
                     continue
 
                 resp = data.get("result", {}).get("response", {})
+                resp_keys = list(resp.keys()) if resp else []
 
                 if mr := resp.get("modelResponse"):
-                    if urls := _collect_image_urls(mr):
+                    urls = _collect_image_urls(mr)
+                    logger.info(
+                        f"ImageCollect: modelResponse found, urls={urls}, "
+                        f"response_format={self.response_format}"
+                    )
+                    if urls:
                         for url in urls:
                             if self.response_format == "url":
                                 processed = await self.process_url(url, "image")
+                                logger.info(f"ImageCollect: process_url result={processed[:120] if processed else None}")
                                 if processed:
                                     images.append(processed)
                                 continue
@@ -224,6 +231,8 @@ class ImageCollectProcessor(BaseProcessor):
                                 processed = await self.process_url(url, "image")
                                 if processed:
                                     images.append(processed)
+                elif resp_keys:
+                    logger.debug(f"ImageCollect: no modelResponse, keys={resp_keys}")
 
         except asyncio.CancelledError:
             logger.debug("Image collect cancelled by client")
@@ -242,6 +251,7 @@ class ImageCollectProcessor(BaseProcessor):
         finally:
             await self.close()
 
+        logger.info(f"ImageCollect: total images collected={len(images)}")
         return images
 
 
