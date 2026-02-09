@@ -52,15 +52,27 @@ def _collect_image_urls(obj: Any) -> List[str]:
         seen.add(url)
         urls.append(url)
 
+    _LIST_KEYS = {
+        "generatedImageUrls", "imageUrls", "imageURLs",
+        "editedImageUrls", "resultImageUrls", "outputImageUrls",
+    }
+    _SINGLE_KEYS = {
+        "imageUrl", "imageURL", "generatedImageUrl", "editedImageUrl",
+    }
+
     def walk(value: Any):
         if isinstance(value, dict):
             for key, item in value.items():
-                if key in {"generatedImageUrls", "imageUrls", "imageURLs"}:
+                if key in _LIST_KEYS:
                     if isinstance(item, list):
                         for url in item:
                             if isinstance(url, str):
                                 add(url)
                     elif isinstance(item, str):
+                        add(item)
+                    continue
+                if key in _SINGLE_KEYS:
+                    if isinstance(item, str):
                         add(item)
                     continue
                 walk(item)
@@ -69,7 +81,25 @@ def _collect_image_urls(obj: Any) -> List[str]:
                 walk(item)
 
     walk(obj)
+
+    # 兜底：按已知字段名未找到 URL 时，扫描所有字符串值查找 Grok 资产路径
+    if not urls:
+        _scan_asset_urls(obj, add)
+
     return urls
+
+
+def _scan_asset_urls(obj: Any, add_fn) -> None:
+    """扫描所有字符串值，查找 Grok 资产 URL 模式"""
+    if isinstance(obj, str):
+        if "/generated/" in obj or "assets.grok.com" in obj:
+            add_fn(obj)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _scan_asset_urls(v, add_fn)
+    elif isinstance(obj, list):
+        for item in obj:
+            _scan_asset_urls(item, add_fn)
 
 
 class StreamIdleTimeoutError(Exception):
