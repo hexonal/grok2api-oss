@@ -229,6 +229,12 @@ async def create_video(
 ):
     """提交视频生成任务，立即返回 task ID"""
 
+    logger.info(
+        f"Video generation request: prompt='{prompt}', model={model}, "
+        f"aspect_ratio={aspect_ratio}, seconds={seconds}, size={size}, "
+        f"has_input_reference={input_reference is not None and bool(input_reference.filename)}"
+    )
+
     # 参数校验
     if not prompt or not prompt.strip():
         raise ValidationException(
@@ -260,6 +266,10 @@ async def create_video(
                     ".webp": "image/webp",
                 }
                 mime = mime_map.get(ext, "image/jpeg")
+            logger.info(
+                f"Video input_reference: filename={input_reference.filename}, "
+                f"size={len(content)} bytes, mime={mime}"
+            )
             b64 = base64.b64encode(content).decode()
             image_data_uri = f"data:{mime};base64,{b64}"
 
