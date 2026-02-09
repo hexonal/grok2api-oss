@@ -70,6 +70,10 @@ class ImageWSBaseProcessor(BaseProcessor):
         oss = get_oss_service()
         if oss.is_enabled():
             content_type = "image/jpeg" if is_final else "image/png"
+            logger.info(
+                f"OSS upload: image_id={image_id}, is_final={is_final}, "
+                f"size={len(raw)} bytes, content_type={content_type}"
+            )
             oss_url = await oss.upload_file(raw, filename, content_type)
             if oss_url:
                 return oss_url

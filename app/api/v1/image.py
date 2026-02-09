@@ -307,6 +307,11 @@ async def create_image(request: ImageGenerationRequest):
     if request.response_format is None:
         request.response_format = resolve_response_format(None)
 
+    logger.info(
+        f"Image generation request: prompt='{request.prompt}', model={request.model}, "
+        f"n={request.n}, size={request.size}, format={request.response_format}, stream={request.stream}"
+    )
+
     # 参数验证
     validate_generation_request(request)
 
@@ -509,6 +514,11 @@ async def edit_image(
     """
     if response_format is None:
         response_format = resolve_response_format(None)
+
+    logger.info(
+        f"Image edit request: prompt='{prompt}', model={model}, "
+        f"n={n}, size={size}, format={response_format}, stream={stream}, images={len(image)}"
+    )
 
     try:
         edit_request = ImageEditRequest(

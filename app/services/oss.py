@@ -55,6 +55,11 @@ class OssService:
         object_key = self._build_object_key(filename, media_type)
         bucket = get_config("oss.bucket")
 
+        logger.info(
+            f"OSS uploading: filename={filename}, size={len(data)} bytes, "
+            f"content_type={content_type}, media_type={media_type}, key={object_key}"
+        )
+
         try:
             async with self._session.client(**self._get_client_kwargs()) as client:
                 await client.put_object(
@@ -64,7 +69,7 @@ class OssService:
                     ContentType=content_type,
                 )
             url = self.get_public_url(object_key)
-            logger.info(f"OSS upload ok: {object_key}")
+            logger.info(f"OSS upload ok: {object_key}, url={url}")
             return url
         except Exception as e:
             logger.warning(f"OSS upload failed: {e}")
