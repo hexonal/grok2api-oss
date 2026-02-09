@@ -202,7 +202,9 @@ class BaseService:
         """获取远程资源并转 Base64"""
         try:
             async with AsyncSession() as session:
-                response = await session.get(url, timeout=10)
+                response = await session.get(
+                    url, timeout=10, headers={"Accept-Encoding": "identity"}
+                )
                 if response.status_code >= 400:
                     raise UpstreamException(
                         message=f"Failed to fetch: {response.status_code}",
