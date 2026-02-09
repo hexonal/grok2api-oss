@@ -46,6 +46,7 @@ class ImageGenerationRequest(BaseModel):
     response_format: Optional[str] = Field(None, description="响应格式")
     style: Optional[str] = Field(None, description="风格 (暂不支持)")
     stream: Optional[bool] = Field(False, description="是否流式输出")
+    image: Optional[List[str]] = Field(None, description="输入图片URL列表 (img2img)")
 
 
 class ImageEditRequest(BaseModel):
@@ -288,6 +289,84 @@ async def call_grok(
                 logger.warning(f"Failed to consume token: {e}")
 
 
+async def _prepare_img2img(token: str, image_urls: List[str], prompt: str, model_info):
+    """上传图片到 Grok 资产服务并构建 img2img raw_payload"""
+    grok_image_urls: List[str] = []
+    upload_service = UploadService()
+    try:
+        for url in image_urls:
+            logger.info(f"img2img uploading reference image: {url}")
+            file_id, file_uri = await upload_service.upload(url, token)
+            if file_uri:
+                if file_uri.startswith("http"):
+                    grok_image_urls.append(file_uri)
+                else:
+                    grok_image_urls.append(f"https://assets.grok.com/{file_uri.lstrip('/')}")
+    finally:
+        await upload_service.close()
+
+    if not grok_image_urls:
+        raise AppException(
+            message="Image upload failed",
+            error_type=ErrorType.SERVER.value,
+            code="upload_failed",
+        )
+
+    # 创建 parent post
+    parent_post_id = None
+    try:
+        media_service = VideoService()
+        parent_post_id = await media_service.create_image_post(token, grok_image_urls[0])
+        logger.info(f"img2img parent post created: {parent_post_id}")
+    except Exception as e:
+        logger.warning(f"img2img create parent post failed: {e}")
+
+    if not parent_post_id:
+        for url in grok_image_urls:
+            match = re.search(r"/generated/([a-f0-9-]+)/", url)
+            if match:
+                parent_post_id = match.group(1)
+                break
+            match = re.search(r"/users/[^/]+/([a-f0-9-]+)/content", url)
+            if match:
+                parent_post_id = match.group(1)
+                break
+
+    model_config_override = {
+        "modelMap": {
+            "imageEditModel": "imagine",
+            "imageEditModelConfig": {
+                "imageReferences": grok_image_urls,
+            },
+        }
+    }
+    if parent_post_id:
+        model_config_override["modelMap"]["imageEditModelConfig"]["parentPostId"] = parent_post_id
+
+    raw_payload = {
+        "temporary": bool(get_config("chat.temporary")),
+        "modelName": model_info.grok_model,
+        "message": prompt,
+        "enableImageGeneration": True,
+        "returnImageBytes": False,
+        "returnRawGrokInXaiRequest": False,
+        "enableImageStreaming": True,
+        "imageGenerationCount": 2,
+        "forceConcise": False,
+        "toolOverrides": {"imageGen": True},
+        "enableSideBySide": True,
+        "sendFinalMetadata": True,
+        "isReasoning": False,
+        "disableTextFollowUps": True,
+        "responseMetadata": {"modelConfigOverride": model_config_override},
+        "disableMemory": False,
+        "forceSideBySide": False,
+    }
+
+    logger.info(f"img2img payload built: imageReferences={grok_image_urls}, parentPostId={parent_post_id}")
+    return raw_payload
+
+
 @router.post("/images/generations")
 async def create_image(request: ImageGenerationRequest):
     """
@@ -309,7 +388,8 @@ async def create_image(request: ImageGenerationRequest):
 
     logger.info(
         f"Image generation request: prompt='{request.prompt}', model={request.model}, "
-        f"n={request.n}, size={request.size}, format={request.response_format}, stream={request.stream}"
+        f"n={request.n}, size={request.size}, format={request.response_format}, "
+        f"stream={request.stream}, image={request.image}"
     )
 
     # 参数验证
@@ -325,10 +405,40 @@ async def create_image(request: ImageGenerationRequest):
     # 获取 token 和模型信息
     token_mgr, token = await _get_token(request.model)
     model_info = ModelService.get(request.model)
-    use_ws = bool(get_config("image.image_ws"))
+    has_images = bool(request.image)
+    # 有参考图片时走 HTTP img2img，不走 WebSocket
+    use_ws = bool(get_config("image.image_ws")) and not has_images
+
+    # img2img: 预处理上传图片并构建 raw_payload
+    img2img_payload = None
+    if has_images:
+        logger.info(f"img2img mode: {len(request.image)} reference images")
+        img2img_payload = await _prepare_img2img(token, request.image, request.prompt, model_info)
 
     # 流式模式
     if request.stream:
+        if img2img_payload:
+            # img2img 流式
+            chat_service = GrokChatService()
+            response = await chat_service.chat(
+                token=token,
+                message=request.prompt,
+                model=model_info.grok_model,
+                mode=None,
+                stream=True,
+                raw_payload=img2img_payload,
+            )
+            processor = ImageStreamProcessor(
+                model_info.model_id, token, n=request.n, response_format=response_format
+            )
+            return StreamingResponse(
+                _wrap_stream_with_usage(
+                    processor.process(response), token_mgr, token, model_info
+                ),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            )
+
         if use_ws:
             aspect_ratio = resolve_aspect_ratio(request.size)
             enable_nsfw = bool(get_config("image.image_ws_nsfw"))
@@ -380,7 +490,35 @@ async def create_image(request: ImageGenerationRequest):
     n = request.n
 
     usage_override = None
-    if use_ws:
+    if img2img_payload:
+        # img2img 非流式
+        chat_service = GrokChatService()
+        success = False
+        try:
+            response = await chat_service.chat(
+                token=token,
+                message=request.prompt,
+                model=model_info.grok_model,
+                mode=None,
+                stream=True,
+                raw_payload=img2img_payload,
+            )
+            processor = ImageCollectProcessor(
+                model_info.model_id, token, response_format=response_format
+            )
+            all_images = await processor.process(response)
+            success = True
+        except Exception as e:
+            logger.error(f"img2img call failed: {e}")
+            all_images = []
+        finally:
+            if success:
+                try:
+                    await token_mgr.consume(token, _get_effort(model_info))
+                except Exception as e:
+                    logger.warning(f"Failed to consume token: {e}")
+
+    elif use_ws:
         aspect_ratio = resolve_aspect_ratio(request.size)
         enable_nsfw = bool(get_config("image.image_ws_nsfw"))
         all_images = []
