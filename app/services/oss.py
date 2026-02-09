@@ -1,5 +1,5 @@
 """
-OSS 对象存储服务 — 将图片上传到 S3 兼容存储
+OSS 对象存储服务 — 将图片/视频上传到 S3 兼容存储
 """
 
 from datetime import datetime, timezone
@@ -33,10 +33,10 @@ class OssService:
             region_name=get_config("oss.region", "us-east-1"),
         )
 
-    def _build_object_key(self, filename: str) -> str:
+    def _build_object_key(self, filename: str, media_type: str = "image") -> str:
         prefix = get_config("oss.path_prefix", "grok").strip("/")
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        return f"{prefix}/image/{date_str}/{filename}"
+        return f"{prefix}/{media_type}/{date_str}/{filename}"
 
     def get_public_url(self, object_key: str) -> str:
         public_base = get_config("oss.public_base_url", "")
@@ -46,13 +46,13 @@ class OssService:
         bucket = get_config("oss.bucket", "")
         return f"{endpoint.rstrip('/')}/{bucket}/{object_key}"
 
-    async def upload_image(
-        self, data: bytes, filename: str, content_type: str = "image/jpeg"
+    async def upload_file(
+        self, data: bytes, filename: str, content_type: str = "image/jpeg", media_type: str = "image"
     ) -> Optional[str]:
         if not self.is_enabled():
             return None
 
-        object_key = self._build_object_key(filename)
+        object_key = self._build_object_key(filename, media_type)
         bucket = get_config("oss.bucket")
 
         try:

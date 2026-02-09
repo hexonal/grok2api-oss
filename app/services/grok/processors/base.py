@@ -148,13 +148,14 @@ class BaseProcessor:
             local_path, mime_type = await dl_service.download(path, self.token, media_type)
             local_url = f"{self.app_url.rstrip('/')}/v1/files/{media_type}{path}"
 
-            if media_type == "image" and local_path and local_path.exists():
+            if local_path and local_path.exists():
                 oss = get_oss_service()
                 if oss.is_enabled():
                     try:
                         data = local_path.read_bytes()
                         filename = local_path.name
-                        oss_url = await oss.upload_image(data, filename, mime_type or "image/jpeg")
+                        default_ct = "video/mp4" if media_type == "video" else "image/jpeg"
+                        oss_url = await oss.upload_file(data, filename, mime_type or default_ct, media_type)
                         if oss_url:
                             return oss_url
                     except Exception as e:
