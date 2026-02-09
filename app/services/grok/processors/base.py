@@ -9,6 +9,7 @@ from typing import Any, AsyncGenerator, Optional, AsyncIterable, List, TypeVar
 from app.core.config import get_config
 from app.core.logger import logger
 from app.services.grok.services.assets import DownloadService
+from app.services.oss import get_oss_service
 
 
 ASSET_URL = "https://assets.grok.com/"
@@ -144,8 +145,22 @@ class BaseProcessor:
 
         if self.app_url:
             dl_service = self._get_dl()
-            await dl_service.download(path, self.token, media_type)
-            return f"{self.app_url.rstrip('/')}/v1/files/{media_type}{path}"
+            local_path, mime_type = await dl_service.download(path, self.token, media_type)
+            local_url = f"{self.app_url.rstrip('/')}/v1/files/{media_type}{path}"
+
+            if media_type == "image" and local_path and local_path.exists():
+                oss = get_oss_service()
+                if oss.is_enabled():
+                    try:
+                        data = local_path.read_bytes()
+                        filename = local_path.name
+                        oss_url = await oss.upload_image(data, filename, mime_type or "image/jpeg")
+                        if oss_url:
+                            return oss_url
+                    except Exception as e:
+                        logger.warning(f"OSS upload in process_url failed: {e}")
+
+            return local_url
         else:
             return f"{ASSET_URL.rstrip('/')}{path}"
 

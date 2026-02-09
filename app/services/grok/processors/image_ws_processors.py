@@ -13,6 +13,7 @@ from app.core.config import get_config
 from app.core.logger import logger
 from app.core.storage import DATA_DIR
 from app.core.exceptions import UpstreamException
+from app.services.oss import get_oss_service
 from .base import BaseProcessor
 
 
@@ -54,16 +55,26 @@ class ImageWSBaseProcessor(BaseProcessor):
             return f"{app_url.rstrip('/')}/v1/files/image/{filename}"
         return f"/v1/files/image/{filename}"
 
-    def _save_blob(self, image_id: str, blob: str, is_final: bool) -> str:
+    async def _save_blob(self, image_id: str, blob: str, is_final: bool) -> str:
         data = self._strip_base64(blob)
         if not data:
             return ""
+        raw = base64.b64decode(data)
         image_dir = self._ensure_image_dir()
         filename = self._filename(image_id, is_final)
         filepath = image_dir / filename
         with open(filepath, "wb") as f:
-            f.write(base64.b64decode(data))
-        return self._build_file_url(filename)
+            f.write(raw)
+        local_url = self._build_file_url(filename)
+
+        oss = get_oss_service()
+        if oss.is_enabled():
+            content_type = "image/jpeg" if is_final else "image/png"
+            oss_url = await oss.upload_image(raw, filename, content_type)
+            if oss_url:
+                return oss_url
+
+        return local_url
 
     def _pick_best(self, existing: Optional[Dict], incoming: Dict) -> Dict:
         if not existing:
@@ -76,10 +87,10 @@ class ImageWSBaseProcessor(BaseProcessor):
             return incoming
         return existing
 
-    def _to_output(self, image_id: str, item: Dict) -> str:
+    async def _to_output(self, image_id: str, item: Dict) -> str:
         try:
             if self.response_format == "url":
-                return self._save_blob(
+                return await self._save_blob(
                     image_id, item.get("blob", ""), item.get("is_final", False)
                 )
             return self._strip_base64(item.get("blob", ""))
@@ -258,7 +269,7 @@ class ImageWSCollectProcessor(ImageWSBaseProcessor):
 
         results: List[str] = []
         for item in selected:
-            output = self._to_output(item.get("image_id", ""), item)
+            output = await self._to_output(item.get("image_id", ""), item)
             if output:
                 results.append(output)
 
