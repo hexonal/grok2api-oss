@@ -234,6 +234,7 @@ class ImageCollectProcessor(BaseProcessor):
         """处理并收集图片"""
         images = []
         idle_timeout = get_config("timeout.stream_idle_timeout")
+        msg_count = 0
 
         try:
             async for line in _with_idle_timeout(response, idle_timeout, self.model):
@@ -245,8 +246,13 @@ class ImageCollectProcessor(BaseProcessor):
                 except orjson.JSONDecodeError:
                     continue
 
+                msg_count += 1
                 resp = data.get("result", {}).get("response", {})
                 resp_keys = list(resp.keys()) if resp else []
+
+                # 诊断：记录每条流消息的 resp keys
+                if resp_keys:
+                    logger.info(f"ImageCollect: msg#{msg_count} resp_keys={resp_keys}")
 
                 # 处理 streamingImageGenerationResponse（img2img 可能通过此字段返回图片）
                 if img := resp.get("streamingImageGenerationResponse"):
@@ -263,26 +269,26 @@ class ImageCollectProcessor(BaseProcessor):
 
                 # 处理 modelResponse
                 if mr := resp.get("modelResponse"):
+                    partial = mr.get("partial") if isinstance(mr, dict) else None
                     mr_keys = list(mr.keys()) if isinstance(mr, dict) else type(mr).__name__
                     urls = _collect_image_urls(mr)
-                    # 诊断：打印关键字段的实际值
-                    diag_fields = {}
+                    # 诊断：打印 partial 状态和关键字段值
+                    diag_fields = {"partial": partial}
                     for k in ("generatedImageUrls", "imageEditUris", "fileUris",
-                              "imageAttachments", "fileAttachments", "mediaTypes"):
+                              "imageAttachments", "fileAttachments", "mediaTypes",
+                              "message"):
                         v = mr.get(k) if isinstance(mr, dict) else None
                         if v:
-                            diag_fields[k] = v if not isinstance(v, (list, dict)) or len(str(v)) < 300 else f"len={len(v)}"
+                            sv = str(v)
+                            diag_fields[k] = sv[:200] if len(sv) > 200 else v
                     logger.info(
                         f"ImageCollect: modelResponse found, urls={urls}, "
-                        f"mr_keys={mr_keys}, diag={diag_fields}, response_format={self.response_format}"
+                        f"diag={diag_fields}, response_format={self.response_format}"
                     )
                     if urls:
                         for url in urls:
                             await self._collect_url(url, images)
                     continue
-
-                if resp_keys:
-                    logger.debug(f"ImageCollect: unhandled resp keys={resp_keys}")
 
         except asyncio.CancelledError:
             logger.debug("Image collect cancelled by client")
