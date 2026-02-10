@@ -55,6 +55,7 @@ def _collect_image_urls(obj: Any) -> List[str]:
     _LIST_KEYS = {
         "generatedImageUrls", "imageUrls", "imageURLs",
         "editedImageUrls", "resultImageUrls", "outputImageUrls",
+        "imageEditUris", "fileUris",
     }
     _SINGLE_KEYS = {
         "imageUrl", "imageURL", "generatedImageUrl", "editedImageUrl",
