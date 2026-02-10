@@ -346,6 +346,7 @@ async def _prepare_img2img(token: str, image_urls: List[str], prompt: str, model
     raw_payload = {
         "temporary": bool(get_config("chat.temporary")),
         "modelName": model_info.grok_model,
+        "modelMode": model_info.model_mode,
         "message": prompt,
         "enableImageGeneration": True,
         "returnImageBytes": False,
@@ -363,7 +364,7 @@ async def _prepare_img2img(token: str, image_urls: List[str], prompt: str, model
         "forceSideBySide": False,
     }
 
-    logger.info(f"img2img payload built: imageReferences={grok_image_urls}, parentPostId={parent_post_id}")
+    logger.info(f"img2img payload built: imageReferences={grok_image_urls}, parentPostId={parent_post_id}, modelMode={model_info.model_mode}")
     return raw_payload
 
 
@@ -795,6 +796,7 @@ async def edit_image(
     raw_payload = {
         "temporary": bool(get_config("chat.temporary")),
         "modelName": model_info.grok_model,
+        "modelMode": model_info.model_mode,
         "message": edit_request.prompt,
         "enableImageGeneration": True,
         "returnImageBytes": False,
