@@ -265,9 +265,16 @@ class ImageCollectProcessor(BaseProcessor):
                 if mr := resp.get("modelResponse"):
                     mr_keys = list(mr.keys()) if isinstance(mr, dict) else type(mr).__name__
                     urls = _collect_image_urls(mr)
+                    # 诊断：打印关键字段的实际值
+                    diag_fields = {}
+                    for k in ("generatedImageUrls", "imageEditUris", "fileUris",
+                              "imageAttachments", "fileAttachments", "mediaTypes"):
+                        v = mr.get(k) if isinstance(mr, dict) else None
+                        if v:
+                            diag_fields[k] = v if not isinstance(v, (list, dict)) or len(str(v)) < 300 else f"len={len(v)}"
                     logger.info(
                         f"ImageCollect: modelResponse found, urls={urls}, "
-                        f"mr_keys={mr_keys}, response_format={self.response_format}"
+                        f"mr_keys={mr_keys}, diag={diag_fields}, response_format={self.response_format}"
                     )
                     if urls:
                         for url in urls:
