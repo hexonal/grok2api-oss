@@ -115,16 +115,8 @@ def _validate_common_request(
 
 def validate_generation_request(request: ImageGenerationRequest):
     """验证图片生成请求参数"""
-    if request.model != "grok-imagine-1.0":
-        raise ValidationException(
-            message="The model `grok-imagine-1.0` is required for image generation.",
-            param="model",
-            code="model_not_supported",
-        )
-    # 验证模型 - 通过 is_image 检查
     model_info = ModelService.get(request.model)
     if not model_info or not model_info.is_image:
-        # 获取支持的图片模型列表
         image_models = [m.model_id for m in ModelService.MODELS if m.is_image]
         raise ValidationException(
             message=(
@@ -203,6 +195,43 @@ def validate_edit_request(request: ImageEditRequest, images: List[UploadFile]):
         )
 
 
+def _is_chat_image_gen(model_id: str) -> bool:
+    """判断是否为 chat-based 图片生成模型（非 grok-imagine 专用模型）"""
+    return model_id.endswith("-imageGen")
+
+
+def _build_chat_image_payload(prompt: str, model_info) -> dict:
+    """为 chat-based imageGen 模型构建 raw_payload（带 toolOverrides.imageGen）"""
+    return {
+        "temporary": bool(get_config("chat.temporary")),
+        "modelName": model_info.grok_model,
+        "message": prompt,
+        "fileAttachments": [],
+        "imageAttachments": [],
+        "disableSearch": False,
+        "enableImageGeneration": True,
+        "returnImageBytes": False,
+        "returnRawGrokInXaiRequest": False,
+        "enableImageStreaming": False,
+        "imageGenerationCount": 2,
+        "forceConcise": False,
+        "toolOverrides": {
+            "imageGen": True,
+            "webSearch": False,
+            "xSearch": False,
+            "xMediaSearch": False,
+            "trendsSearch": False,
+            "xPostAnalyze": False,
+        },
+        "enableSideBySide": True,
+        "sendFinalMetadata": True,
+        "customPersonality": "",
+        "deepsearchPreset": "",
+        "isReasoning": False,
+        "disableTextFollowUps": True,
+    }
+
+
 def _get_effort(model_info) -> EffortType:
     """获取模型消耗级别"""
     return (
@@ -256,6 +285,7 @@ async def call_grok(
     model_info,
     file_attachments: Optional[List[str]] = None,
     response_format: str = "b64_json",
+    raw_payload: Optional[dict] = None,
 ) -> List[str]:
     """调用 Grok 获取图片，返回 base64 列表"""
     chat_service = GrokChatService()
@@ -269,6 +299,7 @@ async def call_grok(
             mode=model_info.model_mode,
             stream=True,
             file_attachments=file_attachments,
+            raw_payload=raw_payload,
         )
 
         processor = ImageCollectProcessor(
@@ -440,6 +471,29 @@ async def create_image(request: ImageGenerationRequest):
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
             )
 
+        # chat-based imageGen（grok-3/4/4.1-imageGen）
+        if _is_chat_image_gen(request.model):
+            raw_payload = _build_chat_image_payload(request.prompt, model_info)
+            chat_service = GrokChatService()
+            response = await chat_service.chat(
+                token=token,
+                message=request.prompt,
+                model=model_info.grok_model,
+                mode=None,
+                stream=True,
+                raw_payload=raw_payload,
+            )
+            processor = ImageStreamProcessor(
+                model_info.model_id, token, n=request.n, response_format=response_format
+            )
+            return StreamingResponse(
+                _wrap_stream_with_usage(
+                    processor.process(response), token_mgr, token, model_info
+                ),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            )
+
         if use_ws:
             aspect_ratio = resolve_aspect_ratio(request.size)
             enable_nsfw = bool(get_config("image.image_ws_nsfw"))
@@ -518,6 +572,32 @@ async def create_image(request: ImageGenerationRequest):
                     await token_mgr.consume(token, _get_effort(model_info))
                 except Exception as e:
                     logger.warning(f"Failed to consume token: {e}")
+
+    elif _is_chat_image_gen(request.model):
+        # chat-based imageGen 非流式
+        raw_payload = _build_chat_image_payload(request.prompt, model_info)
+        calls_needed = (n + 1) // 2
+
+        if calls_needed == 1:
+            all_images = await call_grok(
+                token_mgr, token, request.prompt, model_info,
+                response_format=response_format, raw_payload=raw_payload,
+            )
+        else:
+            tasks = [
+                call_grok(
+                    token_mgr, token, request.prompt, model_info,
+                    response_format=response_format, raw_payload=raw_payload,
+                )
+                for _ in range(calls_needed)
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            all_images = []
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(f"Chat imageGen concurrent call failed: {result}")
+                elif isinstance(result, list):
+                    all_images.extend(result)
 
     elif use_ws:
         aspect_ratio = resolve_aspect_ratio(request.size)

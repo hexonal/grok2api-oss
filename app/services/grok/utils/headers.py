@@ -15,12 +15,12 @@ def _normalize_token(token: str) -> str:
     return token[4:] if token.startswith("sso=") else token
 
 
-def build_sso_cookie(token: str, include_rw: bool = False) -> str:
+def build_sso_cookie(token: str, include_rw: bool = True) -> str:
     token = _normalize_token(token)
     cf = get_config("security.cf_clearance")
     cookie = f"sso={token}"
     if include_rw:
-        cookie = f"{cookie}; sso-rw={token}"
+        cookie = f"sso-rw={token}; {cookie}"
     if cf:
         cookie = f"{cookie};cf_clearance={cf}"
     return cookie

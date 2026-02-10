@@ -120,6 +120,33 @@ class ModelService:
             display_name="GROK-4.1-THINKING",
         ),
         ModelInfo(
+            model_id="grok-3-imageGen",
+            grok_model="grok-3",
+            model_mode="",
+            cost=Cost.HIGH,
+            display_name="Grok-3 ImageGen",
+            description="Image generation via Grok-3 chat",
+            is_image=True,
+        ),
+        ModelInfo(
+            model_id="grok-4-imageGen",
+            grok_model="grok-4",
+            model_mode="",
+            cost=Cost.HIGH,
+            display_name="Grok-4 ImageGen",
+            description="Image generation via Grok-4 chat",
+            is_image=True,
+        ),
+        ModelInfo(
+            model_id="grok-4.1-imageGen",
+            grok_model="grok-4-1-thinking-1129",
+            model_mode="",
+            cost=Cost.HIGH,
+            display_name="Grok-4.1 ImageGen",
+            description="Image generation via Grok-4.1 chat",
+            is_image=True,
+        ),
+        ModelInfo(
             model_id="grok-imagine-1.0",
             grok_model="grok-3",
             model_mode="MODEL_MODE_FAST",
@@ -172,6 +199,20 @@ class ModelService:
         if not model:
             raise ValidationException(f"Invalid model ID: {model_id}")
         return model.grok_model, model.model_mode
+
+    @classmethod
+    def can_generate_image(cls, model_id: str) -> bool:
+        """模型是否支持图片生成（仅 is_image 模型）"""
+        model = cls.get(model_id)
+        return bool(model and model.is_image)
+
+    @classmethod
+    def supports_vision(cls, model_id: str) -> bool:
+        """模型是否支持图片输入/理解（非图片非视频的聊天模型）"""
+        model = cls.get(model_id)
+        if not model:
+            return False
+        return not model.is_image and not model.is_video
 
     @classmethod
     def pool_for_model(cls, model_id: str) -> str:

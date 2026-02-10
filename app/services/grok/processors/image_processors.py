@@ -136,6 +136,13 @@ class ImageStreamProcessor(BaseProcessor):
                     )
                     continue
 
+                # cachedImageGenerationResponse（chat-based imageGen）
+                if cached := resp.get("cachedImageGenerationResponse"):
+                    img_url = cached.get("imageUrl") or ""
+                    if img_url:
+                        await self._collect_image(img_url, final_images, seen)
+                    continue
+
                 # modelResponse
                 if mr := resp.get("modelResponse"):
                     if urls := _collect_image_urls(mr):
@@ -262,6 +269,14 @@ class ImageCollectProcessor(BaseProcessor):
                     progress = img.get("progress", 0)
                     img_url = img.get("imageUrl") or img.get("url") or ""
                     if img_url and progress >= 100:
+                        await self._collect_url(img_url, images, seen)
+                    continue
+
+                # 处理 cachedImageGenerationResponse（chat-based imageGen 通过此字段返回）
+                if cached := resp.get("cachedImageGenerationResponse"):
+                    img_url = cached.get("imageUrl") or ""
+                    if img_url:
+                        logger.info(f"ImageCollect: got cachedImageGeneration URL")
                         await self._collect_url(img_url, images, seen)
                     continue
 
