@@ -4,7 +4,7 @@
 
 import asyncio
 import random
-from typing import AsyncGenerator, AsyncIterable, List
+from typing import AsyncGenerator, AsyncIterable, List, Set
 
 import orjson
 from curl_cffi.requests.errors import RequestsError
@@ -20,6 +20,17 @@ from .base import (
     _collect_image_urls,
     _is_http2_stream_error,
 )
+
+
+def _normalize_asset_path(url: str) -> str:
+    """提取资产路径用于去重（去掉 -part-N 中间产物后缀）"""
+    import re
+    path = url.split("?")[0]
+    path = re.sub(r"-part-\d+/", "/", path)
+    if path.startswith("http"):
+        from urllib.parse import urlparse
+        path = urlparse(path).path
+    return path
 
 
 class ImageStreamProcessor(BaseProcessor):
@@ -44,11 +55,46 @@ class ImageStreamProcessor(BaseProcessor):
         """构建 SSE 响应"""
         return f"event: {event}\ndata: {orjson.dumps(data).decode()}\n\n"
 
+    async def _collect_image(
+        self, url: str, images: list, seen: Set[str]
+    ) -> bool:
+        """收集单张图片，返回是否成功添加（去重）"""
+        key = _normalize_asset_path(url)
+        if key in seen:
+            return False
+        seen.add(key)
+
+        if self.response_format == "url":
+            processed = await self.process_url(url, "image")
+            if processed:
+                images.append(processed)
+                return True
+            return False
+
+        try:
+            dl_service = self._get_dl()
+            base64_data = await dl_service.to_base64(url, self.token, "image")
+            if base64_data:
+                if "," in base64_data:
+                    b64 = base64_data.split(",", 1)[1]
+                else:
+                    b64 = base64_data
+                images.append(b64)
+                return True
+        except Exception as e:
+            logger.warning(f"Failed to convert image to base64, falling back to URL: {e}")
+            processed = await self.process_url(url, "image")
+            if processed:
+                images.append(processed)
+                return True
+        return False
+
     async def process(
         self, response: AsyncIterable[bytes]
     ) -> AsyncGenerator[str, None]:
         """处理流式响应"""
         final_images = []
+        seen: Set[str] = set()
         idle_timeout = get_config("timeout.stream_idle_timeout")
 
         try:
@@ -73,30 +119,10 @@ class ImageStreamProcessor(BaseProcessor):
 
                     out_index = 0 if self.n == 1 else image_index
 
-                    # img2img: progress=100 时可能携带图片 URL
+                    # progress=100 时携带最终图片 URL
                     img_url = img.get("imageUrl") or img.get("url") or ""
                     if img_url and progress >= 100:
-                        if self.response_format == "url":
-                            processed = await self.process_url(img_url, "image")
-                            if processed:
-                                final_images.append(processed)
-                        else:
-                            try:
-                                dl_service = self._get_dl()
-                                base64_data = await dl_service.to_base64(
-                                    img_url, self.token, "image"
-                                )
-                                if base64_data:
-                                    if "," in base64_data:
-                                        b64 = base64_data.split(",", 1)[1]
-                                    else:
-                                        b64 = base64_data
-                                    final_images.append(b64)
-                            except Exception as e:
-                                logger.warning(f"Failed to convert streaming image to base64: {e}")
-                                processed = await self.process_url(img_url, "image")
-                                if processed:
-                                    final_images.append(processed)
+                        await self._collect_image(img_url, final_images, seen)
                         continue
 
                     yield self._sse(
@@ -114,29 +140,7 @@ class ImageStreamProcessor(BaseProcessor):
                 if mr := resp.get("modelResponse"):
                     if urls := _collect_image_urls(mr):
                         for url in urls:
-                            if self.response_format == "url":
-                                processed = await self.process_url(url, "image")
-                                if processed:
-                                    final_images.append(processed)
-                                continue
-                            try:
-                                dl_service = self._get_dl()
-                                base64_data = await dl_service.to_base64(
-                                    url, self.token, "image"
-                                )
-                                if base64_data:
-                                    if "," in base64_data:
-                                        b64 = base64_data.split(",", 1)[1]
-                                    else:
-                                        b64 = base64_data
-                                    final_images.append(b64)
-                            except Exception as e:
-                                logger.warning(
-                                    f"Failed to convert image to base64, falling back to URL: {e}"
-                                )
-                                processed = await self.process_url(url, "image")
-                                if processed:
-                                    final_images.append(processed)
+                            await self._collect_image(url, final_images, seen)
                     continue
 
             for index, b64 in enumerate(final_images):
@@ -207,11 +211,16 @@ class ImageCollectProcessor(BaseProcessor):
         super().__init__(model, token)
         self.response_format = response_format
 
-    async def _collect_url(self, url: str, images: list) -> None:
-        """收集单个图片 URL，根据 response_format 处理"""
+    async def _collect_url(self, url: str, images: list, seen: Set[str]) -> None:
+        """收集单个图片 URL，去重 + 根据 response_format 处理"""
+        key = _normalize_asset_path(url)
+        if key in seen:
+            logger.debug(f"ImageCollect: skipping duplicate {url[:80]}")
+            return
+        seen.add(key)
+
         if self.response_format == "url":
             processed = await self.process_url(url, "image")
-            logger.info(f"ImageCollect: process_url result={processed[:120] if processed else None}")
             if processed:
                 images.append(processed)
             return
@@ -233,8 +242,8 @@ class ImageCollectProcessor(BaseProcessor):
     async def process(self, response: AsyncIterable[bytes]) -> List[str]:
         """处理并收集图片"""
         images = []
+        seen: Set[str] = set()
         idle_timeout = get_config("timeout.stream_idle_timeout")
-        msg_count = 0
 
         try:
             async for line in _with_idle_timeout(response, idle_timeout, self.model):
@@ -246,48 +255,21 @@ class ImageCollectProcessor(BaseProcessor):
                 except orjson.JSONDecodeError:
                     continue
 
-                msg_count += 1
                 resp = data.get("result", {}).get("response", {})
-                resp_keys = list(resp.keys()) if resp else []
 
-                # 诊断：记录每条流消息的 resp keys
-                if resp_keys:
-                    logger.info(f"ImageCollect: msg#{msg_count} resp_keys={resp_keys}")
-
-                # 处理 streamingImageGenerationResponse（img2img 可能通过此字段返回图片）
+                # 处理 streamingImageGenerationResponse（img2img 通过此字段返回图片）
                 if img := resp.get("streamingImageGenerationResponse"):
                     progress = img.get("progress", 0)
                     img_url = img.get("imageUrl") or img.get("url") or ""
-                    logger.info(
-                        f"ImageCollect: streamingImageGenerationResponse "
-                        f"progress={progress}, imageUrl={img_url[:120] if img_url else None}, "
-                        f"keys={list(img.keys())}"
-                    )
                     if img_url and progress >= 100:
-                        await self._collect_url(img_url, images)
+                        await self._collect_url(img_url, images, seen)
                     continue
 
                 # 处理 modelResponse
                 if mr := resp.get("modelResponse"):
-                    partial = mr.get("partial") if isinstance(mr, dict) else None
-                    mr_keys = list(mr.keys()) if isinstance(mr, dict) else type(mr).__name__
-                    urls = _collect_image_urls(mr)
-                    # 诊断：打印 partial 状态和关键字段值
-                    diag_fields = {"partial": partial}
-                    for k in ("generatedImageUrls", "imageEditUris", "fileUris",
-                              "imageAttachments", "fileAttachments", "mediaTypes",
-                              "message"):
-                        v = mr.get(k) if isinstance(mr, dict) else None
-                        if v:
-                            sv = str(v)
-                            diag_fields[k] = sv[:200] if len(sv) > 200 else v
-                    logger.info(
-                        f"ImageCollect: modelResponse found, urls={urls}, "
-                        f"diag={diag_fields}, response_format={self.response_format}"
-                    )
-                    if urls:
+                    if urls := _collect_image_urls(mr):
                         for url in urls:
-                            await self._collect_url(url, images)
+                            await self._collect_url(url, images, seen)
                     continue
 
         except asyncio.CancelledError:

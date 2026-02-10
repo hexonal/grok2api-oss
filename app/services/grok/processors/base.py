@@ -175,20 +175,16 @@ class BaseProcessor:
         if not path.startswith("/"):
             path = f"/{path}"
 
-        logger.info(f"process_url: original={original_path}, path={path}, app_url={self.app_url}")
+        logger.debug(f"process_url: original={original_path}, path={path}")
 
         if self.app_url:
             dl_service = self._get_dl()
             local_path, mime_type = await dl_service.download(path, self.token, media_type)
             local_url = f"{self.app_url.rstrip('/')}/v1/files/{media_type}{path}"
 
-            logger.info(f"process_url: downloaded local_path={local_path}, exists={local_path.exists() if local_path else False}, mime={mime_type}")
-
             if local_path and local_path.exists():
                 oss = get_oss_service()
-                oss_enabled = oss.is_enabled()
-                logger.info(f"process_url: oss_enabled={oss_enabled}")
-                if oss_enabled:
+                if oss.is_enabled():
                     try:
                         data = local_path.read_bytes()
                         filename = local_path.name
@@ -200,12 +196,9 @@ class BaseProcessor:
                     except Exception as e:
                         logger.warning(f"OSS upload in process_url failed: {e}")
 
-            logger.info(f"process_url: returning local_url={local_url}")
             return local_url
         else:
-            direct_url = f"{ASSET_URL.rstrip('/')}{path}"
-            logger.info(f"process_url: no app_url, returning direct={direct_url}")
-            return direct_url
+            return f"{ASSET_URL.rstrip('/')}{path}"
 
 
 __all__ = [
