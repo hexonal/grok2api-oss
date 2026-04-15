@@ -278,6 +278,58 @@ async def _get_token(model: str):
     return token_mgr, token
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """判断异常是否属于上游限流"""
+    if exc is None:
+        return False
+
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code == "rate_limit_exceeded":
+        return True
+
+    message = str(exc).lower()
+    if not message:
+        return False
+
+    return (
+        "rate_limit_exceeded" in message
+        or "rate limit exceeded" in message
+        or "too many requests" in message
+    )
+
+
+def _new_rate_limit_exception() -> AppException:
+    return AppException(
+        message="Image generation is currently rate limited upstream. Please retry later.",
+        error_type=ErrorType.RATE_LIMIT.value,
+        code="rate_limit_exceeded",
+        status_code=429,
+    )
+
+
+def _raise_if_no_images(images: List[str], rate_limited: bool):
+    """无有效图片时抛出标准错误，避免返回 200 + error 占位"""
+    if images:
+        return
+
+    if rate_limited:
+        raise _new_rate_limit_exception()
+
+    raise AppException(
+        message="Image generation failed upstream. Please retry later.",
+        error_type=ErrorType.SERVER.value,
+        code="upstream_error",
+        status_code=502,
+    )
+
+
+def _select_images(images: List[str], n: int) -> List[str]:
+    """按请求数量选图，不补 error 占位"""
+    if len(images) <= n:
+        return images.copy()
+    return random.sample(images, n)
+
+
 async def call_grok(
     token_mgr,
     token: str,
@@ -310,6 +362,10 @@ async def call_grok(
         return images
 
     except Exception as e:
+        if _is_rate_limit_error(e):
+            if isinstance(e, AppException):
+                raise e
+            raise _new_rate_limit_exception() from e
         logger.error(f"Grok image call failed: {e}")
         return []
     finally:
@@ -543,6 +599,7 @@ async def create_image(request: ImageGenerationRequest):
 
     # 非流式模式
     n = request.n
+    rate_limited = False
 
     usage_override = None
     if img2img_payload:
@@ -565,6 +622,8 @@ async def create_image(request: ImageGenerationRequest):
             success = True
         except Exception as e:
             logger.error(f"img2img call failed: {e}")
+            if _is_rate_limit_error(e):
+                rate_limited = True
             all_images = []
         finally:
             if success:
@@ -596,6 +655,8 @@ async def create_image(request: ImageGenerationRequest):
             for result in results:
                 if isinstance(result, Exception):
                     logger.error(f"Chat imageGen concurrent call failed: {result}")
+                    if _is_rate_limit_error(result):
+                        rate_limited = True
                 elif isinstance(result, list):
                     all_images.extend(result)
 
@@ -634,6 +695,8 @@ async def create_image(request: ImageGenerationRequest):
         for batch in results:
             if isinstance(batch, Exception):
                 logger.warning(f"WS batch failed: {batch}")
+                if _is_rate_limit_error(batch):
+                    rate_limited = True
                 continue
             for img in batch:
                 if img not in seen:
@@ -684,17 +747,13 @@ async def create_image(request: ImageGenerationRequest):
             for result in results:
                 if isinstance(result, Exception):
                     logger.error(f"Concurrent call failed: {result}")
+                    if _is_rate_limit_error(result):
+                        rate_limited = True
                 elif isinstance(result, list):
                     all_images.extend(result)
 
-    # 随机选取 n 张图片
-    if len(all_images) >= n:
-        selected_images = random.sample(all_images, n)
-    else:
-        # 全部返回，error 填充缺失
-        selected_images = all_images.copy()
-        while len(selected_images) < n:
-            selected_images.append("error")
+    _raise_if_no_images(all_images, rate_limited)
+    selected_images = _select_images(all_images, n)
 
     # 构建响应
     data = [{response_field: img} for img in selected_images]
@@ -923,22 +982,30 @@ async def edit_image(
 
     # 非流式模式
     n = edit_request.n
+    rate_limited = False
     calls_needed = (n + 1) // 2
 
     async def _call_edit():
-        chat_service = GrokChatService()
-        response = await chat_service.chat(
-            token=token,
-            message=edit_request.prompt,
-            model=model_info.grok_model,
-            mode=None,
-            stream=True,
-            raw_payload=raw_payload,
-        )
-        processor = ImageCollectProcessor(
-            model_info.model_id, token, response_format=response_format
-        )
-        return await processor.process(response)
+        try:
+            chat_service = GrokChatService()
+            response = await chat_service.chat(
+                token=token,
+                message=edit_request.prompt,
+                model=model_info.grok_model,
+                mode=None,
+                stream=True,
+                raw_payload=raw_payload,
+            )
+            processor = ImageCollectProcessor(
+                model_info.model_id, token, response_format=response_format
+            )
+            return await processor.process(response)
+        except Exception as e:
+            if _is_rate_limit_error(e):
+                if isinstance(e, AppException):
+                    raise e
+                raise _new_rate_limit_exception() from e
+            raise e
 
     if calls_needed == 1:
         all_images = await _call_edit()
@@ -950,16 +1017,13 @@ async def edit_image(
         for result in results:
             if isinstance(result, Exception):
                 logger.error(f"Concurrent call failed: {result}")
+                if _is_rate_limit_error(result):
+                    rate_limited = True
             elif isinstance(result, list):
                 all_images.extend(result)
 
-    # 选择图片
-    if len(all_images) >= n:
-        selected_images = random.sample(all_images, n)
-    else:
-        selected_images = all_images.copy()
-        while len(selected_images) < n:
-            selected_images.append("error")
+    _raise_if_no_images(all_images, rate_limited)
+    selected_images = _select_images(all_images, n)
 
     data = [{response_field: img} for img in selected_images]
 
