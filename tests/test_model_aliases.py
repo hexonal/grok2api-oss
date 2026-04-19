@@ -9,10 +9,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.api.v1.image import (
+    DEFAULT_IMAGE_EDIT_MODEL,
     ImageEditRequest,
     ImageGenerationRequest,
     normalize_edit_model,
     normalize_generation_model,
+    resolve_generation_runtime_model,
     validate_edit_request,
     validate_generation_request,
 )
@@ -99,6 +101,47 @@ def test_generation_size_is_restricted_for_official_imagine_models():
         model="grok-imagine-image",
         n=1,
         size="1536x1024",
+    )
+
+    with pytest.raises(ValidationException):
+        validate_generation_request(request)
+
+
+def test_img2img_uses_edit_runtime_model():
+    request = ImageGenerationRequest(
+        prompt="draw a dragon",
+        model="grok-imagine-image",
+        image=["https://example.com/ref.jpg"],
+        n=1,
+        size="1024x1024",
+    )
+
+    runtime_model = resolve_generation_runtime_model(request)
+
+    assert runtime_model.model_id == DEFAULT_IMAGE_EDIT_MODEL
+
+
+def test_img2img_streaming_allows_url_response_format():
+    request = ImageGenerationRequest(
+        prompt="draw a dragon",
+        model="grok-imagine-image",
+        image=["https://example.com/ref.jpg"],
+        n=1,
+        size="1024x1024",
+        stream=True,
+        response_format="url",
+    )
+
+    validate_generation_request(request)
+
+
+def test_img2img_limits_n_to_two():
+    request = ImageGenerationRequest(
+        prompt="draw a dragon",
+        model="grok-imagine-image",
+        image=["https://example.com/ref.jpg"],
+        n=3,
+        size="1024x1024",
     )
 
     with pytest.raises(ValidationException):

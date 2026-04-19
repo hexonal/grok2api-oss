@@ -102,6 +102,13 @@ def normalize_edit_model(model_id: Optional[str]) -> str:
     return LEGACY_IMAGE_EDIT_ALIASES.get(model_id, model_id)
 
 
+def resolve_generation_runtime_model(request: ImageGenerationRequest):
+    """根据请求确定图片生成实际执行模型"""
+    if request.image:
+        return ModelService.get(DEFAULT_IMAGE_EDIT_MODEL)
+    return ModelService.get(normalize_generation_model(request.model))
+
+
 def _generation_model_ids() -> list[str]:
     return [
         model.model_id
@@ -192,9 +199,8 @@ def _validate_common_request(
 def validate_generation_request(request: ImageGenerationRequest):
     """验证图片生成请求参数"""
     request.model = normalize_generation_model(request.model)
-    model_info = ModelService.get(request.model)
     image_models = _generation_model_ids()
-    if not model_info or request.model not in image_models:
+    if request.model not in image_models:
         raise ValidationException(
             message=(
                 f"The model `{request.model}` is not supported for image generation. "
@@ -203,9 +209,16 @@ def validate_generation_request(request: ImageGenerationRequest):
             param="model",
             code="model_not_supported",
         )
-    _validate_common_request(request, allow_ws_stream=True)
-    _validate_image_model_count(request.model, request.n)
-    _validate_imagine_image_size(request.model, request.size)
+    _validate_common_request(request, allow_ws_stream=not bool(request.image))
+    runtime_model = resolve_generation_runtime_model(request)
+    if not runtime_model:
+        raise ValidationException(
+            message="Runtime model is not available for this request.",
+            param="model",
+            code="model_not_supported",
+        )
+    _validate_image_model_count(runtime_model.model_id, request.n)
+    _validate_imagine_image_size(runtime_model.model_id, request.size)
 
 
 def resolve_response_format(response_format: Optional[str]) -> str:
@@ -573,8 +586,14 @@ async def create_image(request: ImageGenerationRequest):
     response_field = response_field_name(response_format)
 
     # 获取 token 和模型信息
-    token_mgr, token = await _get_token(request.model)
-    model_info = ModelService.get(request.model)
+    model_info = resolve_generation_runtime_model(request)
+    if not model_info:
+        raise ValidationException(
+            message="Runtime model is not available for this request.",
+            param="model",
+            code="model_not_supported",
+        )
+    token_mgr, token = await _get_token(model_info.model_id)
     has_images = bool(request.image)
     # 有参考图片时走 HTTP img2img，不走 WebSocket
     use_ws = bool(get_config("image.image_ws")) and not has_images
