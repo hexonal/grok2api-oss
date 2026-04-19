@@ -36,6 +36,15 @@ def _default_quota_for_pool(pool_name: str) -> int:
     return BASIC__DEFAULT_QUOTA
 
 
+def _describe_token_for_log(token_info: TokenInfo) -> str:
+    """格式化日志中的 token 描述，避免输出完整 token。"""
+    masked = f"{token_info.token[:10]}..."
+    note = (token_info.note or "").strip()
+    if note:
+        return f"token={masked}, note={note}"
+    return f"token={masked}"
+
+
 class TokenManager:
     """管理 Token 的增删改查和配额同步"""
 
@@ -281,12 +290,12 @@ class TokenManager:
                 if idx == 0:
                     logger.info(
                         f"Video token routing: resolution={resolution}, length={video_length}s -> "
-                        f"pool={pool_name} (token={token_info.token[:10]}...)"
+                        f"pool={pool_name} ({_describe_token_for_log(token_info)})"
                     )
                 else:
                     logger.info(
                         f"Video token routing: fallback from {ordered_pools[0]} -> {pool_name} "
-                        f"(token={token_info.token[:10]}...)"
+                        f"({_describe_token_for_log(token_info)})"
                     )
                 return token_info
 

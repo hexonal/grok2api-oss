@@ -7,7 +7,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.services.grok.models.model import ModelService
-from app.services.token.manager import TokenManager
+from app.services.token.manager import TokenManager, _describe_token_for_log
 from app.services.token.models import TokenInfo
 from app.services.token.pool import TokenPool
 
@@ -65,3 +65,19 @@ def test_video_token_routing_keeps_super_first_candidates_for_normal_jobs():
 
     assert token_info is not None
     assert token_info.token == "super-token"
+
+
+def test_token_log_description_includes_note_when_available():
+    token_info = TokenInfo(token="super-token-abcdef", quota=140, note="徐凌霄")
+
+    description = _describe_token_for_log(token_info)
+
+    assert description == "token=super-toke..., note=徐凌霄"
+
+
+def test_token_log_description_omits_empty_note():
+    token_info = TokenInfo(token="basic-token-abcdef", quota=80)
+
+    description = _describe_token_for_log(token_info)
+
+    assert description == "token=basic-toke..."
