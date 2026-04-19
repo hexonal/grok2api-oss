@@ -36,6 +36,102 @@ from app.services.token import get_token_manager, EffortType
 
 router = APIRouter(tags=["Videos"])
 
+DEFAULT_VIDEO_MODEL = "grok-imagine-video"
+DEFAULT_VIDEO_SIZE = "1024x1024"
+DEFAULT_VIDEO_RESOLUTION = "480p"
+DEFAULT_VIDEO_PRESET = "normal"
+LEGACY_VIDEO_MODEL_ALIASES = {
+    "grok-imagine-1.0-video": DEFAULT_VIDEO_MODEL,
+}
+OFFICIAL_VIDEO_SIZES = {
+    "720x1280",
+    "1280x720",
+    "1024x1024",
+    "1024x1792",
+    "1792x1024",
+}
+OFFICIAL_VIDEO_LENGTHS = {6, 10, 12, 16, 20}
+OFFICIAL_VIDEO_RESOLUTION_NAMES = {"480p", "720p"}
+OFFICIAL_VIDEO_PRESETS = {"fun", "normal", "spicy", "custom"}
+VIDEO_SIZE_TO_ASPECT_RATIO = {
+    "720x1280": "9:16",
+    "1280x720": "16:9",
+    "1024x1024": "1:1",
+    "1024x1792": "9:16",
+    "1792x1024": "16:9",
+}
+LEGACY_ASPECT_RATIO_TO_VIDEO_SIZE = {
+    "9:16": "1024x1792",
+    "16:9": "1792x1024",
+    "1:1": "1024x1024",
+    "2:3": "1024x1792",
+    "3:2": "1792x1024",
+}
+
+
+def normalize_video_model(model_id: Optional[str]) -> str:
+    """规范化视频模型名"""
+    if not model_id:
+        return DEFAULT_VIDEO_MODEL
+    return LEGACY_VIDEO_MODEL_ALIASES.get(model_id, model_id)
+
+
+def _normalize_video_resolution_name(size: str, resolution_name: Optional[str]) -> str:
+    normalized_size = (size or "").lower()
+    normalized_resolution = (resolution_name or "").lower()
+    if not normalized_resolution and normalized_size in OFFICIAL_VIDEO_RESOLUTION_NAMES:
+        normalized_resolution = normalized_size
+    if not normalized_resolution:
+        normalized_resolution = DEFAULT_VIDEO_RESOLUTION
+    if normalized_resolution not in OFFICIAL_VIDEO_RESOLUTION_NAMES:
+        raise ValidationException(
+            message=(
+                "resolution_name must be one of "
+                f"{sorted(OFFICIAL_VIDEO_RESOLUTION_NAMES)}"
+            ),
+            param="resolution_name",
+            code="invalid_resolution_name",
+        )
+    return normalized_resolution
+
+
+def _normalize_video_size(size: str, aspect_ratio: Optional[str]) -> str:
+    normalized_size = (size or "").lower()
+    if normalized_size in OFFICIAL_VIDEO_RESOLUTION_NAMES:
+        normalized_size = ""
+    if not normalized_size:
+        normalized_size = LEGACY_ASPECT_RATIO_TO_VIDEO_SIZE.get(
+            (aspect_ratio or "").lower(),
+            DEFAULT_VIDEO_SIZE,
+        )
+    if normalized_size not in OFFICIAL_VIDEO_SIZES:
+        raise ValidationException(
+            message=f"size must be one of {sorted(OFFICIAL_VIDEO_SIZES)}",
+            param="size",
+            code="invalid_size",
+        )
+    return normalized_size
+
+
+def _validate_video_seconds(seconds: int) -> None:
+    if seconds not in OFFICIAL_VIDEO_LENGTHS:
+        raise ValidationException(
+            message=f"seconds must be one of {sorted(OFFICIAL_VIDEO_LENGTHS)}",
+            param="seconds",
+            code="invalid_seconds",
+        )
+
+
+def _validate_video_preset(preset: str) -> str:
+    normalized = (preset or DEFAULT_VIDEO_PRESET).lower()
+    if normalized not in OFFICIAL_VIDEO_PRESETS:
+        raise ValidationException(
+            message=f"preset must be one of {sorted(OFFICIAL_VIDEO_PRESETS)}",
+            param="preset",
+            code="invalid_preset",
+        )
+    return normalized
+
 # ---------------------------------------------------------------------------
 # Task storage
 # ---------------------------------------------------------------------------
@@ -94,9 +190,10 @@ async def _expire_task(task_id: str, ttl: int) -> None:
 async def _run_video_generation(
     task: VideoTask,
     image_data_uri: Optional[str],
-    aspect_ratio: str,
-    seconds: int,
     size: str,
+    seconds: int,
+    resolution_name: str,
+    preset: str,
 ) -> None:
     """后台执行视频生成并更新 task 状态"""
     token_str: Optional[str] = None
@@ -109,7 +206,7 @@ async def _run_video_generation(
 
         pool_candidates = ModelService.pool_candidates_for_model(task.model)
         token_info = token_mgr.get_token_for_video(
-            resolution=size,
+            resolution=resolution_name,
             video_length=seconds,
             pool_candidates=pool_candidates,
         )
@@ -136,6 +233,7 @@ async def _run_video_generation(
 
         # 3) 调用 VideoService 获取流
         service = VideoService()
+        aspect_ratio = VIDEO_SIZE_TO_ASPECT_RATIO[size]
         if image_url:
             response = await service.generate_from_image(
                 token_str,
@@ -143,7 +241,8 @@ async def _run_video_generation(
                 [image_url],
                 aspect_ratio,
                 seconds,
-                size,
+                resolution_name,
+                preset,
             )
         else:
             response = await service.generate(
@@ -151,7 +250,8 @@ async def _run_video_generation(
                 task.prompt,
                 aspect_ratio,
                 seconds,
-                size,
+                resolution_name,
+                preset,
             )
 
         # 4) 解析流获取进度和最终 URL
@@ -221,10 +321,12 @@ async def _run_video_generation(
 @router.post("/videos")
 async def create_video(
     prompt: str = Form(None),
-    model: str = Form("grok-imagine-1.0-video"),
-    aspect_ratio: str = Form("3:2"),
+    model: str = Form(DEFAULT_VIDEO_MODEL),
+    aspect_ratio: Optional[str] = Form(None),
     seconds: str = Form("6"),
-    size: str = Form("480p"),
+    size: str = Form(DEFAULT_VIDEO_SIZE),
+    resolution_name: Optional[str] = Form(None),
+    preset: str = Form(DEFAULT_VIDEO_PRESET),
     input_reference: Optional[UploadFile] = File(None),
 ):
     """提交视频生成任务，立即返回 task ID"""
@@ -232,6 +334,7 @@ async def create_video(
     logger.info(
         f"Video generation request: prompt='{prompt}', model={model}, "
         f"aspect_ratio={aspect_ratio}, seconds={seconds}, size={size}, "
+        f"resolution_name={resolution_name}, preset={preset}, "
         f"has_input_reference={input_reference is not None and bool(input_reference.filename)}"
     )
 
@@ -243,12 +346,28 @@ async def create_video(
             code="missing_prompt",
         )
 
+    model = normalize_video_model(model)
+    model_info = ModelService.get(model)
+    if not model_info or not model_info.is_video:
+        raise ValidationException(
+            message=f"The model `{model}` is not supported for video generation.",
+            param="model",
+            code="model_not_supported",
+        )
+
     # 规范化参数
-    size = size.lower()
     try:
         seconds_int = int(seconds)
     except (ValueError, TypeError):
-        seconds_int = 6
+        raise ValidationException(
+            message="seconds must be an integer",
+            param="seconds",
+            code="invalid_seconds",
+        )
+    _validate_video_seconds(seconds_int)
+    normalized_preset = _validate_video_preset(preset)
+    normalized_size = _normalize_video_size(size, aspect_ratio)
+    normalized_resolution = _normalize_video_resolution_name(size, resolution_name)
 
     # 读取 input_reference 文件 → base64 data-URI
     image_data_uri: Optional[str] = None
@@ -280,7 +399,14 @@ async def create_video(
 
     # 启动后台生成
     asyncio.create_task(
-        _run_video_generation(task, image_data_uri, aspect_ratio, seconds_int, size)
+        _run_video_generation(
+            task,
+            image_data_uri,
+            normalized_size,
+            seconds_int,
+            normalized_resolution,
+            normalized_preset,
+        )
     )
     # 1 小时后自动清理
     asyncio.create_task(_expire_task(task_id, 3600))

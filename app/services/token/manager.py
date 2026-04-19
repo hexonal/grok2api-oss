@@ -185,7 +185,11 @@ class TokenManager:
             if self._dirty:
                 self._schedule_save()
 
-    def get_token(self, pool_name: str = "ssoBasic") -> Optional[str]:
+    def get_token(
+        self,
+        pool_name: str = "ssoBasic",
+        exclude_tokens: Optional[set[str]] = None,
+    ) -> Optional[str]:
         """
         获取可用 Token
 
@@ -200,7 +204,7 @@ class TokenManager:
             logger.warning(f"Pool '{pool_name}' not found")
             return None
 
-        token_info = pool.select()
+        token_info = pool.select(exclude_tokens=exclude_tokens)
         if not token_info:
             logger.warning(f"No available token in pool '{pool_name}'")
             return None
@@ -210,7 +214,11 @@ class TokenManager:
             return token[4:]
         return token
 
-    def get_token_info(self, pool_name: str = "ssoBasic") -> Optional["TokenInfo"]:
+    def get_token_info(
+        self,
+        pool_name: str = "ssoBasic",
+        exclude_tokens: Optional[set[str]] = None,
+    ) -> Optional["TokenInfo"]:
         """
         获取可用 Token 的完整信息
 
@@ -225,7 +233,7 @@ class TokenManager:
             logger.warning(f"Pool '{pool_name}' not found")
             return None
 
-        token_info = pool.select()
+        token_info = pool.select(exclude_tokens=exclude_tokens)
         if not token_info:
             logger.warning(f"No available token in pool '{pool_name}'")
             return None

@@ -34,12 +34,37 @@ from app.core.logger import logger
 
 router = APIRouter(tags=["Images"])
 
+DEFAULT_IMAGE_MODEL = "grok-imagine-image"
+DEFAULT_IMAGE_EDIT_MODEL = "grok-imagine-image-edit"
+LEGACY_IMAGE_GENERATION_ALIASES = {
+    "grok-imagine-1.0": DEFAULT_IMAGE_MODEL,
+}
+LEGACY_IMAGE_EDIT_ALIASES = {
+    "grok-imagine-1.0-edit": DEFAULT_IMAGE_EDIT_MODEL,
+}
+OFFICIAL_IMAGE_SIZES = {
+    "1280x720",
+    "720x1280",
+    "1792x1024",
+    "1024x1792",
+    "1024x1024",
+}
+OFFICIAL_IMAGE_MODELS = {
+    "grok-imagine-image-lite",
+    "grok-imagine-image",
+    "grok-imagine-image-pro",
+}
+IMAGE_EDIT_MODEL_IDS = {
+    DEFAULT_IMAGE_EDIT_MODEL,
+    "grok-imagine-1.0-edit",
+}
+
 
 class ImageGenerationRequest(BaseModel):
     """图片生成请求 - OpenAI 兼容"""
 
     prompt: str = Field(..., description="图片描述")
-    model: Optional[str] = Field("grok-imagine-1.0", description="模型名称")
+    model: Optional[str] = Field(DEFAULT_IMAGE_MODEL, description="模型名称")
     n: Optional[int] = Field(1, ge=1, le=10, description="生成数量 (1-10)")
     size: Optional[str] = Field("1024x1024", description="图片尺寸 (暂不支持)")
     quality: Optional[str] = Field("standard", description="图片质量 (暂不支持)")
@@ -53,7 +78,7 @@ class ImageEditRequest(BaseModel):
     """图片编辑请求 - OpenAI 兼容"""
 
     prompt: str = Field(..., description="编辑描述")
-    model: Optional[str] = Field("grok-imagine-1.0-edit", description="模型名称")
+    model: Optional[str] = Field(DEFAULT_IMAGE_EDIT_MODEL, description="模型名称")
     image: Optional[Union[str, List[str]]] = Field(None, description="待编辑图片文件")
     n: Optional[int] = Field(1, ge=1, le=10, description="生成数量 (1-10)")
     size: Optional[str] = Field("1024x1024", description="图片尺寸 (暂不支持)")
@@ -61,6 +86,57 @@ class ImageEditRequest(BaseModel):
     response_format: Optional[str] = Field(None, description="响应格式")
     style: Optional[str] = Field(None, description="风格 (暂不支持)")
     stream: Optional[bool] = Field(False, description="是否流式输出")
+
+
+def normalize_generation_model(model_id: Optional[str]) -> str:
+    """规范化图片生成模型名"""
+    if not model_id:
+        return DEFAULT_IMAGE_MODEL
+    return LEGACY_IMAGE_GENERATION_ALIASES.get(model_id, model_id)
+
+
+def normalize_edit_model(model_id: Optional[str]) -> str:
+    """规范化图片编辑模型名"""
+    if not model_id:
+        return DEFAULT_IMAGE_EDIT_MODEL
+    return LEGACY_IMAGE_EDIT_ALIASES.get(model_id, model_id)
+
+
+def _generation_model_ids() -> list[str]:
+    return [
+        model.model_id
+        for model in ModelService.MODELS
+        if model.is_image and model.model_id not in IMAGE_EDIT_MODEL_IDS
+    ]
+
+
+def _validate_image_model_count(model_id: str, count: int) -> None:
+    max_images = 10
+    if model_id == "grok-imagine-image-lite":
+        max_images = 4
+    if model_id in IMAGE_EDIT_MODEL_IDS:
+        max_images = 2
+    if count > max_images:
+        raise ValidationException(
+            message=f"n must be between 1 and {max_images} for model `{model_id}`",
+            param="n",
+            code="invalid_n",
+        )
+
+
+def _validate_imagine_image_size(model_id: str, size: str) -> None:
+    if model_id not in OFFICIAL_IMAGE_MODELS and model_id not in IMAGE_EDIT_MODEL_IDS:
+        return
+    normalized = (size or "").lower()
+    if normalized not in OFFICIAL_IMAGE_SIZES:
+        raise ValidationException(
+            message=(
+                f"size must be one of {sorted(OFFICIAL_IMAGE_SIZES)} "
+                f"for model `{model_id}`"
+            ),
+            param="size",
+            code="invalid_size",
+        )
 
 
 def _validate_common_request(
@@ -115,9 +191,10 @@ def _validate_common_request(
 
 def validate_generation_request(request: ImageGenerationRequest):
     """验证图片生成请求参数"""
+    request.model = normalize_generation_model(request.model)
     model_info = ModelService.get(request.model)
-    if not model_info or not model_info.is_image:
-        image_models = [m.model_id for m in ModelService.MODELS if m.is_image]
+    image_models = _generation_model_ids()
+    if not model_info or request.model not in image_models:
         raise ValidationException(
             message=(
                 f"The model `{request.model}` is not supported for image generation. "
@@ -127,6 +204,8 @@ def validate_generation_request(request: ImageGenerationRequest):
             code="model_not_supported",
         )
     _validate_common_request(request, allow_ws_stream=True)
+    _validate_image_model_count(request.model, request.n)
+    _validate_imagine_image_size(request.model, request.size)
 
 
 def resolve_response_format(response_format: Optional[str]) -> str:
@@ -174,13 +253,16 @@ def resolve_aspect_ratio(size: str) -> str:
 
 def validate_edit_request(request: ImageEditRequest, images: List[UploadFile]):
     """验证图片编辑请求参数"""
-    if request.model != "grok-imagine-1.0-edit":
+    request.model = normalize_edit_model(request.model)
+    if request.model not in IMAGE_EDIT_MODEL_IDS:
         raise ValidationException(
-            message=("The model `grok-imagine-1.0-edit` is required for image edits."),
+            message=("The model `grok-imagine-image-edit` is required for image edits."),
             param="model",
             code="model_not_supported",
         )
     _validate_common_request(request, allow_ws_stream=False)
+    _validate_image_model_count(request.model, request.n)
+    _validate_imagine_image_size(request.model, request.size)
     if not images:
         raise ValidationException(
             message="Image is required",
@@ -777,7 +859,7 @@ async def create_image(request: ImageGenerationRequest):
 async def edit_image(
     prompt: str = Form(...),
     image: List[UploadFile] = File(...),
-    model: Optional[str] = Form("grok-imagine-1.0-edit"),
+    model: Optional[str] = Form(DEFAULT_IMAGE_EDIT_MODEL),
     n: int = Form(1),
     size: str = Form("1024x1024"),
     quality: str = Form("standard"),

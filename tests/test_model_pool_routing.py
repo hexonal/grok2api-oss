@@ -30,6 +30,20 @@ def test_grok_4_prefers_basic_then_super():
     ]
 
 
+def test_image_lite_prefers_basic_then_super():
+    assert ModelService.pool_candidates_for_model("grok-imagine-image-lite") == [
+        "ssoBasic",
+        "ssoSuper",
+    ]
+
+
+def test_image_pro_prefers_super_then_basic():
+    assert ModelService.pool_candidates_for_model("grok-imagine-image-pro") == [
+        "ssoSuper",
+        "ssoBasic",
+    ]
+
+
 def test_video_token_routing_keeps_super_first_candidates_for_normal_jobs():
     manager = TokenManager()
 
@@ -46,7 +60,7 @@ def test_video_token_routing_keeps_super_first_candidates_for_normal_jobs():
     token_info = manager.get_token_for_video(
         resolution="480p",
         video_length=6,
-        pool_candidates=ModelService.pool_candidates_for_model("grok-imagine-1.0-video"),
+        pool_candidates=ModelService.pool_candidates_for_model("grok-imagine-video"),
     )
 
     assert token_info is not None

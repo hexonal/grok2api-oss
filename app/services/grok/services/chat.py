@@ -380,6 +380,58 @@ class ChatService:
     """Chat 业务服务"""
 
     @staticmethod
+    def _extract_status(error: Exception) -> int | None:
+        if isinstance(error, UpstreamException) and error.details:
+            return error.details.get("status")
+        return None
+
+    @staticmethod
+    async def _request_with_failover(
+        chat_request: ChatRequest,
+        token_mgr,
+    ) -> tuple[Any, str, str]:
+        attempted_tokens: set[str] = set()
+        last_auth_error: UpstreamException | None = None
+        service = GrokChatService()
+
+        for pool_name in ModelService.pool_candidates_for_model(chat_request.model):
+            while True:
+                token = token_mgr.get_token(
+                    pool_name,
+                    exclude_tokens=attempted_tokens,
+                )
+                if not token:
+                    break
+
+                attempted_tokens.add(token.removeprefix("sso="))
+                try:
+                    response, _, model_name = await service.chat_openai(
+                        token,
+                        chat_request,
+                    )
+                    return response, model_name, token
+                except UpstreamException as exc:
+                    status = ChatService._extract_status(exc)
+                    if status not in (401, 403):
+                        raise
+
+                    last_auth_error = exc
+                    logger.warning(
+                        f"Chat auth failed: model={chat_request.model}, "
+                        f"pool={pool_name}, token={token[:10]}..., trying next token"
+                    )
+
+        if last_auth_error:
+            raise last_auth_error
+
+        raise AppException(
+            message="No available tokens. Please try again later.",
+            error_type=ErrorType.RATE_LIMIT.value,
+            code="rate_limit_exceeded",
+            status_code=429,
+        )
+
+    @staticmethod
     async def completions(
         model: str,
         messages: List[Dict[str, Any]],
@@ -391,20 +443,6 @@ class ChatService:
         token_mgr = await get_token_manager()
         await token_mgr.reload_if_stale()
 
-        token = None
-        for pool_name in ModelService.pool_candidates_for_model(model):
-            token = token_mgr.get_token(pool_name)
-            if token:
-                break
-
-        if not token:
-            raise AppException(
-                message="No available tokens. Please try again later.",
-                error_type=ErrorType.RATE_LIMIT.value,
-                code="rate_limit_exceeded",
-                status_code=429,
-            )
-
         # 解析参数
         think = {"enabled": True, "disabled": False}.get(thinking)
         is_stream = stream if stream is not None else get_config("chat.stream")
@@ -414,9 +452,10 @@ class ChatService:
             model=model, messages=messages, stream=is_stream, think=think
         )
 
-        # 请求 Grok
-        service = GrokChatService()
-        response, _, model_name = await service.chat_openai(token, chat_request)
+        response, model_name, token = await ChatService._request_with_failover(
+            chat_request,
+            token_mgr,
+        )
 
         # 处理响应
         if is_stream:

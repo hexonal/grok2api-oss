@@ -20,6 +20,7 @@ SUPER_DEFAULT_QUOTA = 140
 
 # 失败阈值
 FAIL_THRESHOLD = 5
+AUTH_FAIL_FAST_STATUS_CODES = {403}
 
 
 class TokenStatus(str, Enum):
@@ -138,6 +139,11 @@ class TokenInfo(BaseModel):
         self.last_fail_at = int(datetime.now().timestamp() * 1000)
         self.last_fail_reason = reason
 
+        if status_code in AUTH_FAIL_FAST_STATUS_CODES:
+            self.fail_count = max(self.fail_count, FAIL_THRESHOLD)
+            self.status = TokenStatus.EXPIRED
+            return
+
         if self.fail_count >= FAIL_THRESHOLD:
             self.status = TokenStatus.EXPIRED
 
@@ -194,4 +200,5 @@ __all__ = [
     "BASIC__DEFAULT_QUOTA",
     "SUPER_DEFAULT_QUOTA",
     "FAIL_THRESHOLD",
+    "AUTH_FAIL_FAST_STATUS_CODES",
 ]

@@ -28,7 +28,7 @@ class TokenPool:
         """获取 Token"""
         return self._tokens.get(token_str)
 
-    def select(self) -> Optional[TokenInfo]:
+    def select(self, exclude_tokens: Optional[set[str]] = None) -> Optional[TokenInfo]:
         """
         选择一个可用 Token
         策略:
@@ -36,11 +36,15 @@ class TokenPool:
         2. 优先选择剩余额度最多的
         3. 如果额度相同，随机选择（避免并发冲突）
         """
+        blocked = exclude_tokens or set()
+
         # 选择 token
         available = [
             t
             for t in self._tokens.values()
-            if t.status == TokenStatus.ACTIVE and t.quota > 0
+            if t.status == TokenStatus.ACTIVE
+            and t.quota > 0
+            and t.token not in blocked
         ]
 
         if not available:
