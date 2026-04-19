@@ -140,7 +140,7 @@ async def _run_video_generation(
             response = await service.generate_from_image(
                 token_str,
                 task.prompt,
-                image_url,
+                [image_url],
                 aspect_ratio,
                 seconds,
                 size,

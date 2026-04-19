@@ -54,6 +54,8 @@ GROK_DEFAULTS = {
         "auto_refresh": True,
         "refresh_interval_hours": 8,
         "super_refresh_interval_hours": 2,
+        "expired_cleanup_enabled": True,
+        "expired_cleanup_interval_minutes": 10,
         "fail_threshold": 5,
         "save_delay_ms": 500,
         "reload_interval_sec": 30,
@@ -61,6 +63,9 @@ GROK_DEFAULTS = {
     "cache": {
         "enable_auto_clean": True,
         "limit_mb": 1024,
+        "media_max_mb": 0,
+        "image_max_mb": 0,
+        "video_max_mb": 0,
     },
     "performance": {
         "assets_max_concurrent": 25,

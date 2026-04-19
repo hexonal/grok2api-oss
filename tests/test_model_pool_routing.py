@@ -1,0 +1,53 @@
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.services.grok.models.model import ModelService
+from app.services.token.manager import TokenManager
+from app.services.token.models import TokenInfo
+from app.services.token.pool import TokenPool
+
+
+def test_grok_4_heavy_is_super_only():
+    assert ModelService.pool_candidates_for_model("grok-4-heavy") == ["ssoSuper"]
+
+
+def test_grok_4_1_expert_prefers_super_then_basic():
+    assert ModelService.pool_candidates_for_model("grok-4.1-expert") == [
+        "ssoSuper",
+        "ssoBasic",
+    ]
+
+
+def test_grok_4_prefers_basic_then_super():
+    assert ModelService.pool_candidates_for_model("grok-4") == [
+        "ssoBasic",
+        "ssoSuper",
+    ]
+
+
+def test_video_token_routing_keeps_super_first_candidates_for_normal_jobs():
+    manager = TokenManager()
+
+    basic_pool = TokenPool("ssoBasic")
+    basic_pool.add(TokenInfo(token="basic-token", quota=80))
+    super_pool = TokenPool("ssoSuper")
+    super_pool.add(TokenInfo(token="super-token", quota=140))
+
+    manager.pools = {
+        "ssoBasic": basic_pool,
+        "ssoSuper": super_pool,
+    }
+
+    token_info = manager.get_token_for_video(
+        resolution="480p",
+        video_length=6,
+        pool_candidates=ModelService.pool_candidates_for_model("grok-imagine-1.0-video"),
+    )
+
+    assert token_info is not None
+    assert token_info.token == "super-token"

@@ -18,7 +18,7 @@ from app.services.grok.protocols.grpc_web import (
     parse_grpc_web_response,
     get_grpc_status,
 )
-from app.services.grok.utils.headers import build_sso_cookie
+from app.services.grok.utils.headers import build_sso_cookie, resolve_security_profile
 
 NSFW_API = "https://grok.com/auth_mgmt.AuthManagement/UpdateUserFeatureControls"
 BIRTH_DATE_API = "https://grok.com/rest/auth/set-birth-date"
@@ -62,7 +62,7 @@ class NSFWService:
     def _build_headers(self, token: str) -> dict:
         """构造 gRPC-Web 请求头"""
         cookie = build_sso_cookie(token, include_rw=True)
-        user_agent = get_config("security.user_agent")
+        user_agent, _cf_clearance = resolve_security_profile()
         return {
             "accept": "*/*",
             "content-type": "application/grpc-web+proto",
@@ -77,7 +77,7 @@ class NSFWService:
     def _build_birth_headers(self, token: str) -> dict:
         """构造设置出生日期请求头"""
         cookie = build_sso_cookie(token, include_rw=True)
-        user_agent = get_config("security.user_agent")
+        user_agent, _cf_clearance = resolve_security_profile()
         return {
             "accept": "*/*",
             "content-type": "application/json",

@@ -259,10 +259,10 @@ class TokenManager:
         primary_pool = SUPER_POOL_NAME if requires_super else BASIC_POOL_NAME
 
         if pool_candidates:
-            ordered_pools = list(pool_candidates)
-            if primary_pool in ordered_pools:
-                ordered_pools.remove(primary_pool)
-                ordered_pools.insert(0, primary_pool)
+            ordered_pools = list(dict.fromkeys(pool_candidates))
+            if requires_super and SUPER_POOL_NAME in ordered_pools:
+                ordered_pools.remove(SUPER_POOL_NAME)
+                ordered_pools.insert(0, SUPER_POOL_NAME)
         else:
             fallback_pool = BASIC_POOL_NAME if requires_super else SUPER_POOL_NAME
             ordered_pools = [primary_pool, fallback_pool]
@@ -537,6 +537,28 @@ class TokenManager:
 
         logger.warning("Token not found for removal")
         return False
+
+    async def cleanup_expired_tokens(self) -> Dict[str, int]:
+        """删除所有已过期的 Token"""
+        checked = 0
+        removed = 0
+
+        for pool in self.pools.values():
+            expired_tokens = []
+            for token_info in pool.list():
+                checked += 1
+                if token_info.status == TokenStatus.EXPIRED:
+                    expired_tokens.append(token_info.token)
+
+            for token_str in expired_tokens:
+                if pool.remove(token_str):
+                    removed += 1
+
+        if removed:
+            await self._save()
+
+        logger.info(f"Expired token cleanup: checked={checked}, removed={removed}")
+        return {"checked": checked, "removed": removed}
 
     async def reset_all(self):
         """重置所有 Token 配额"""

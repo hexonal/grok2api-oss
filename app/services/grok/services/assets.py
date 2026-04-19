@@ -26,7 +26,11 @@ from app.core.config import get_config
 from app.core.exceptions import AppException, UpstreamException, ValidationException
 from app.core.logger import logger
 from app.core.storage import DATA_DIR
-from app.services.grok.utils.headers import apply_statsig, build_sso_cookie
+from app.services.grok.utils.headers import (
+    apply_statsig,
+    build_sso_cookie,
+    resolve_security_profile,
+)
 from app.services.token.service import TokenService
 
 # ==================== 常量 ====================
@@ -126,13 +130,14 @@ class ServiceConfig:
 
     @classmethod
     def from_settings(cls, proxy: Optional[str] = None):
+        user_agent, _cf_clearance = resolve_security_profile()
         return cls(
             proxy=proxy
             or get_config("network.asset_proxy_url")
             or get_config("network.base_proxy_url"),
             timeout=get_config("network.timeout"),
             browser=get_config("security.browser"),
-            user_agent=get_config("security.user_agent"),
+            user_agent=user_agent,
         )
 
     def get_proxies(self) -> Optional[dict]:
@@ -711,6 +716,79 @@ class DownloadService(BaseService):
 
         return {"count": count, "size_mb": round(total_size / 1024 / 1024, 2)}
 
+    @staticmethod
+    def _limit_bytes(config_key: str, fallback_mb: float = 0) -> int:
+        limit_mb = get_config(config_key, fallback_mb)
+        try:
+            limit_mb = float(limit_mb)
+        except Exception:
+            limit_mb = float(fallback_mb)
+        if limit_mb <= 0:
+            return 0
+        return int(limit_mb * 1024 * 1024)
+
+    @staticmethod
+    def _prune_oldest(
+        files: List[Tuple[Path, float, int]],
+        limit_bytes: int,
+        scope: str,
+    ) -> Tuple[int, int]:
+        if limit_bytes <= 0:
+            return 0, 0
+
+        total_size = sum(size for _path, _mtime, size in files)
+        if total_size <= limit_bytes:
+            return 0, 0
+
+        deleted_count = 0
+        deleted_size = 0
+        for file_path, _mtime, size in sorted(files, key=lambda item: item[1]):
+            try:
+                file_path.unlink()
+            except Exception as exc:
+                logger.warning(
+                    f"Cache cleanup skipped: scope={scope}, path={file_path}, error={exc}"
+                )
+                continue
+
+            deleted_count += 1
+            deleted_size += size
+            total_size -= size
+            if total_size <= limit_bytes:
+                break
+
+        if deleted_count:
+            logger.info(
+                f"Cache cleanup: scope={scope}, deleted={deleted_count}, "
+                f"size_mb={deleted_size / 1024 / 1024:.2f}"
+            )
+        return deleted_count, deleted_size
+
+    def _collect_files_for_media(
+        self,
+        media_type: Optional[str] = None,
+    ) -> List[Tuple[Path, float, int]]:
+        if media_type == "image":
+            dirs = [self.image_dir]
+        elif media_type == "video":
+            dirs = [self.video_dir]
+        else:
+            dirs = [self.image_dir, self.video_dir]
+
+        files = []
+        for directory in dirs:
+            if not directory.exists():
+                continue
+            for file_path in directory.glob("*"):
+                if not file_path.is_file():
+                    continue
+                try:
+                    stat = file_path.stat()
+                except Exception:
+                    continue
+                files.append((file_path, stat.st_mtime, stat.st_size))
+        return files
+
     async def check_limit(self):
         """检查并清理缓存"""
         if self._cleanup_running or not get_config("cache.enable_auto_clean"):
@@ -719,57 +797,30 @@ class DownloadService(BaseService):
         self._cleanup_running = True
         try:
             async with _file_lock("cache_cleanup", timeout=5):
-                limit_mb = get_config("cache.limit_mb")
-                all_files, total_size = self._collect_files()
-                current_mb = total_size / 1024 / 1024
-
-                if current_mb <= limit_mb:
-                    return
-
-                # 清理到 80%
-                logger.info(
-                    f"Cache limit exceeded ({current_mb:.2f}MB > {limit_mb}MB), cleaning..."
+                shared_limit = self._limit_bytes(
+                    "cache.media_max_mb",
+                    get_config("cache.limit_mb", 0),
                 )
-                all_files.sort(key=lambda x: x[1])  # 按时间排序
+                image_limit = self._limit_bytes("cache.image_max_mb")
+                video_limit = self._limit_bytes("cache.video_max_mb")
 
-                deleted_count = 0
-                deleted_size = 0
-                target_mb = limit_mb * 0.8
-
-                for f, _, size in all_files:
-                    try:
-                        f.unlink()
-                        deleted_count += 1
-                        deleted_size += size
-                        total_size -= size
-                        if (total_size / 1024 / 1024) <= target_mb:
-                            break
-                    except Exception:
-                        pass
-
-                logger.info(
-                    f"Cache cleanup: {deleted_count} files ({deleted_size / 1024 / 1024:.2f}MB)"
+                self._prune_oldest(
+                    self._collect_files_for_media(),
+                    shared_limit,
+                    "all",
+                )
+                self._prune_oldest(
+                    self._collect_files_for_media("image"),
+                    image_limit,
+                    "image",
+                )
+                self._prune_oldest(
+                    self._collect_files_for_media("video"),
+                    video_limit,
+                    "video",
                 )
         finally:
             self._cleanup_running = False
-
-    def _collect_files(self) -> Tuple[List[Tuple[Path, float, int]], int]:
-        """收集所有缓存文件"""
-        total_size = 0
-        all_files = []
-
-        for d in [self.image_dir, self.video_dir]:
-            if d.exists():
-                for f in d.glob("*"):
-                    if f.is_file():
-                        try:
-                            stat = f.stat()
-                            total_size += stat.st_size
-                            all_files.append((f, stat.st_mtime, stat.st_size))
-                        except Exception:
-                            pass
-
-        return all_files, total_size
 
 
 __all__ = [

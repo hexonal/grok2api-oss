@@ -10,7 +10,11 @@ from curl_cffi.requests import AsyncSession
 from app.core.logger import logger
 from app.core.config import get_config
 from app.core.exceptions import UpstreamException
-from app.services.grok.utils.headers import apply_statsig, build_sso_cookie
+from app.services.grok.utils.headers import (
+    apply_statsig,
+    build_sso_cookie,
+    resolve_security_profile,
+)
 from app.services.grok.utils.retry import retry_on_status
 
 LIMITS_API = "https://grok.com/rest/rate-limits"
@@ -28,7 +32,7 @@ class UsageService:
 
     def _build_headers(self, token: str) -> dict:
         """构建请求头"""
-        user_agent = get_config("security.user_agent")
+        user_agent, _cf_clearance = resolve_security_profile()
         headers = {
             "Accept": "*/*",
             "Accept-Encoding": "gzip, deflate, br, zstd",

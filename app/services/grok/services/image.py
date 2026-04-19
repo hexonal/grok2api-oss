@@ -17,7 +17,7 @@ from aiohttp_socks import ProxyConnector
 
 from app.core.config import get_config
 from app.core.logger import logger
-from app.services.grok.utils.headers import build_sso_cookie
+from app.services.grok.utils.headers import build_sso_cookie, resolve_security_profile
 
 WS_URL = "wss://grok.com/ws/imagine/listen"
 
@@ -49,7 +49,7 @@ class ImageService:
 
     def _get_ws_headers(self, token: str) -> Dict[str, str]:
         cookie = build_sso_cookie(token, include_rw=True)
-        user_agent = get_config("security.user_agent")
+        user_agent, _cf_clearance = resolve_security_profile()
         return {
             "Cookie": cookie,
             "Origin": "https://grok.com",

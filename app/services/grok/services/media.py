@@ -3,7 +3,7 @@ Grok 视频生成服务
 """
 
 import asyncio
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, Sequence
 
 import orjson
 from curl_cffi.requests import AsyncSession
@@ -19,7 +19,11 @@ from app.core.exceptions import (
 from app.services.grok.models.model import ModelService
 from app.services.token import get_token_manager, EffortType
 from app.services.grok.processors import VideoStreamProcessor, VideoCollectProcessor
-from app.services.grok.utils.headers import apply_statsig, build_sso_cookie
+from app.services.grok.utils.headers import (
+    apply_statsig,
+    build_sso_cookie,
+    resolve_security_profile,
+)
 from app.services.grok.utils.stream import wrap_stream_with_usage
 
 CREATE_POST_API = "https://grok.com/rest/media/post/create"
@@ -50,7 +54,7 @@ class VideoService:
         self, token: str, referer: str = "https://grok.com/imagine"
     ) -> dict:
         """构建请求头"""
-        user_agent = get_config("security.user_agent")
+        user_agent, _cf_clearance = resolve_security_profile()
         headers = {
             "Accept": "*/*",
             "Accept-Language": "zh-CN,zh;q=0.9",
@@ -142,6 +146,7 @@ class VideoService:
         video_length: int = 6,
         resolution_name: str = "480p",
         preset: str = "normal",
+        image_references: Optional[Sequence[str]] = None,
     ) -> dict:
         """构建视频生成载荷"""
         mode_map = {
@@ -150,6 +155,16 @@ class VideoService:
             "spicy": "--mode=extremely-spicy-or-crazy",
         }
         mode_flag = mode_map.get(preset, "--mode=custom")
+
+        video_config = {
+            "aspectRatio": aspect_ratio,
+            "parentPostId": post_id,
+            "resolutionName": resolution_name,
+            "videoLength": video_length,
+        }
+        if image_references:
+            video_config["imageReferences"] = list(image_references)
+            video_config["isReferenceToVideo"] = True
 
         payload = {
             "temporary": True,
@@ -168,14 +183,7 @@ class VideoService:
             "responseMetadata": {
                 "experiments": [],
                 "modelConfigOverride": {
-                    "modelMap": {
-                        "videoGenModelConfig": {
-                            "aspectRatio": aspect_ratio,
-                            "parentPostId": post_id,
-                            "resolutionName": resolution_name,
-                            "videoLength": video_length,
-                        }
-                    }
+                    "modelMap": {"videoGenModelConfig": video_config}
                 },
             },
         }
@@ -193,13 +201,20 @@ class VideoService:
         video_length: int,
         resolution_name: str,
         preset: str,
+        image_references: Optional[Sequence[str]] = None,
     ) -> AsyncGenerator[bytes, None]:
         """内部生成逻辑"""
         session = None
         try:
             headers = self._build_headers(token)
             payload = self._build_payload(
-                prompt, post_id, aspect_ratio, video_length, resolution_name, preset
+                prompt,
+                post_id,
+                aspect_ratio,
+                video_length,
+                resolution_name,
+                preset,
+                image_references=image_references,
             )
 
             session = AsyncSession(impersonate=get_config("security.browser"))
@@ -272,20 +287,31 @@ class VideoService:
         self,
         token: str,
         prompt: str,
-        image_url: str,
+        image_urls: Sequence[str],
         aspect_ratio: str = "3:2",
         video_length: int = 6,
         resolution: str = "480p",
         preset: str = "normal",
     ) -> AsyncGenerator[bytes, None]:
         """从图片生成视频"""
+        if not image_urls:
+            raise ValidationException("图生视频至少需要一张参考图")
+        primary_image_url = image_urls[0]
         logger.info(
-            f"Image to video: prompt='{prompt[:50]}...', image={image_url[:80]}"
+            "Image to video: "
+            f"prompt='{prompt[:50]}...', references={len(image_urls)}"
         )
         async with _get_semaphore():
-            post_id = await self.create_image_post(token, image_url)
+            post_id = await self.create_image_post(token, primary_image_url)
             return await self._generate_internal(
-                token, post_id, prompt, aspect_ratio, video_length, resolution, preset
+                token,
+                post_id,
+                prompt,
+                aspect_ratio,
+                video_length,
+                resolution,
+                preset,
+                image_references=image_urls,
             )
 
     @staticmethod
@@ -338,7 +364,7 @@ class VideoService:
             raise ValidationException(str(e))
 
         # 处理图片附件
-        image_url = None
+        image_urls = []
         if attachments:
             upload_service = UploadService()
             try:
@@ -346,16 +372,22 @@ class VideoService:
                     if attach_type == "image":
                         _, file_uri = await upload_service.upload(attach_data, token)
                         image_url = f"https://assets.grok.com/{file_uri}"
+                        image_urls.append(image_url)
                         logger.info(f"Image uploaded for video: {image_url}")
-                        break
             finally:
                 await upload_service.close()
 
         # 生成视频
         service = VideoService()
-        if image_url:
+        if image_urls:
             response = await service.generate_from_image(
-                token, prompt, image_url, aspect_ratio, video_length, resolution, preset
+                token,
+                prompt,
+                image_urls,
+                aspect_ratio,
+                video_length,
+                resolution,
+                preset,
             )
         else:
             response = await service.generate(

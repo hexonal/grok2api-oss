@@ -20,7 +20,11 @@ from app.services.grok.models.model import ModelService
 from app.services.grok.services.assets import UploadService
 from app.services.grok.processors import StreamProcessor, CollectProcessor
 from app.services.grok.utils.retry import retry_on_status
-from app.services.grok.utils.headers import apply_statsig, build_sso_cookie
+from app.services.grok.utils.headers import (
+    apply_statsig,
+    build_sso_cookie,
+    resolve_security_profile,
+)
 from app.services.grok.utils.stream import wrap_stream_with_usage
 from app.services.token import get_token_manager, EffortType
 
@@ -125,7 +129,7 @@ class ChatRequestBuilder:
     @staticmethod
     def build_headers(token: str) -> Dict[str, str]:
         """构造请求头"""
-        user_agent = get_config("security.user_agent")
+        user_agent, _cf_clearance = resolve_security_profile()
         headers = {
             "Accept": "*/*",
             "Accept-Encoding": "gzip, deflate, br, zstd",

@@ -10,8 +10,12 @@ const NUMERIC_FIELDS = new Set([
   'retry_budget',
   'refresh_interval_hours',
   'super_refresh_interval_hours',
+  'expired_cleanup_interval_minutes',
   'fail_threshold',
   'limit_mb',
+  'media_max_mb',
+  'image_max_mb',
+  'video_max_mb',
   'save_delay_ms',
   'assets_max_concurrent',
   'media_max_concurrent',
@@ -89,6 +93,8 @@ const LOCALE_MAP = {
     "auto_refresh": { title: "自动刷新", desc: "是否开启 Token 自动刷新机制。" },
     "refresh_interval_hours": { title: "刷新间隔", desc: "普通 Token 刷新的时间间隔（小时）。" },
     "super_refresh_interval_hours": { title: "Super 刷新间隔", desc: "Super Token 刷新的时间间隔（小时）。" },
+    "expired_cleanup_enabled": { title: "自动删除过期 Token", desc: "是否定时删除状态为 expired 的 Token。" },
+    "expired_cleanup_interval_minutes": { title: "过期清理间隔", desc: "删除 expired Token 的轮询间隔（分钟）。" },
     "fail_threshold": { title: "失败阈值", desc: "单个 Token 连续失败多少次后被标记为不可用。" },
     "save_delay_ms": { title: "保存延迟", desc: "Token 变更合并写入的延迟（毫秒）。" },
     "reload_interval_sec": { title: "同步间隔", desc: "多 worker 场景下 Token 状态刷新间隔（秒）。" }
@@ -96,7 +102,10 @@ const LOCALE_MAP = {
   "cache": {
     "label": "缓存管理",
     "enable_auto_clean": { title: "自动清理", desc: "是否启用缓存自动清理，开启后按上限自动回收。" },
-    "limit_mb": { title: "清理阈值", desc: "缓存大小阈值（MB），超过阈值会触发清理。" }
+    "limit_mb": { title: "旧版总阈值", desc: "兼容旧配置的总缓存阈值（MB）。当共享缓存阈值未设置时回退使用。" },
+    "media_max_mb": { title: "共享缓存上限", desc: "图片和视频共享的总缓存上限（MB），小于等于 0 时回退到旧版总阈值。" },
+    "image_max_mb": { title: "图片缓存上限", desc: "图片缓存独立上限（MB），小于等于 0 表示不单独限制。" },
+    "video_max_mb": { title: "视频缓存上限", desc: "视频缓存独立上限（MB），小于等于 0 表示不单独限制。" }
   },
   "performance": {
     "label": "并发性能",

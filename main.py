@@ -56,14 +56,19 @@ async def lifespan(app: FastAPI):
     logger.info(f"Platform: {platform.system()} {platform.release()}")
     logger.info(f"Python: {sys.version.split()[0]}")
 
-    # 4. 启动 Token 刷新调度器
+    # 4. 启动 Token 调度器
     refresh_enabled = get_config("token.auto_refresh", True)
-    if refresh_enabled:
+    cleanup_enabled = get_config("token.expired_cleanup_enabled", True)
+    if refresh_enabled or cleanup_enabled:
         basic_interval = get_config("token.refresh_interval_hours", 8)
         super_interval = get_config("token.super_refresh_interval_hours", 2)
-        interval = min(basic_interval, super_interval)
-        scheduler = get_scheduler(interval)
-        scheduler.start()
+        refresh_interval = min(basic_interval, super_interval)
+        cleanup_interval = get_config("token.expired_cleanup_interval_minutes", 10)
+        scheduler = get_scheduler(refresh_interval, cleanup_interval)
+        scheduler.start(
+            enable_refresh=refresh_enabled,
+            enable_cleanup=cleanup_enabled,
+        )
 
     logger.info("Application startup complete.")
     yield
@@ -76,7 +81,7 @@ async def lifespan(app: FastAPI):
     if StorageFactory._instance:
         await StorageFactory._instance.close()
 
-    if refresh_enabled:
+    if refresh_enabled or cleanup_enabled:
         scheduler = get_scheduler()
         scheduler.stop()
 

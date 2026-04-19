@@ -23,6 +23,14 @@ class Cost(str, Enum):
     HIGH = "high"
 
 
+class PoolRouting(str, Enum):
+    """Token 池路由策略"""
+
+    BASIC_THEN_SUPER = "basic_then_super"
+    SUPER_THEN_BASIC = "super_then_basic"
+    SUPER_ONLY = "super_only"
+
+
 class ModelInfo(BaseModel):
     """模型信息"""
 
@@ -30,6 +38,7 @@ class ModelInfo(BaseModel):
     grok_model: str
     model_mode: str
     tier: Tier = Field(default=Tier.BASIC)
+    pool_routing: PoolRouting = Field(default=PoolRouting.BASIC_THEN_SUPER)
     cost: Cost = Field(default=Cost.LOW)
     display_name: str
     description: str = ""
@@ -89,6 +98,7 @@ class ModelService:
             model_mode="MODEL_MODE_HEAVY",
             cost=Cost.HIGH,
             tier=Tier.SUPER,
+            pool_routing=PoolRouting.SUPER_ONLY,
             display_name="GROK-4-HEAVY",
         ),
         ModelInfo(
@@ -110,6 +120,7 @@ class ModelService:
             grok_model="grok-4-1-thinking-1129",
             model_mode="MODEL_MODE_EXPERT",
             cost=Cost.HIGH,
+            pool_routing=PoolRouting.SUPER_THEN_BASIC,
             display_name="GROK-4.1-EXPERT",
         ),
         ModelInfo(
@@ -117,6 +128,7 @@ class ModelService:
             grok_model="grok-4-1-thinking-1129",
             model_mode="MODEL_MODE_GROK_4_1_THINKING",
             cost=Cost.HIGH,
+            pool_routing=PoolRouting.SUPER_THEN_BASIC,
             display_name="GROK-4.1-THINKING",
         ),
         ModelInfo(
@@ -124,6 +136,7 @@ class ModelService:
             grok_model="grok-3",
             model_mode="",
             cost=Cost.HIGH,
+            pool_routing=PoolRouting.SUPER_THEN_BASIC,
             display_name="Grok-3 ImageGen",
             description="Image generation via Grok-3 chat",
             is_image=True,
@@ -133,6 +146,7 @@ class ModelService:
             grok_model="grok-4",
             model_mode="",
             cost=Cost.HIGH,
+            pool_routing=PoolRouting.SUPER_THEN_BASIC,
             display_name="Grok-4 ImageGen",
             description="Image generation via Grok-4 chat",
             is_image=True,
@@ -142,6 +156,7 @@ class ModelService:
             grok_model="grok-4-1-thinking-1129",
             model_mode="",
             cost=Cost.HIGH,
+            pool_routing=PoolRouting.SUPER_THEN_BASIC,
             display_name="Grok-4.1 ImageGen",
             description="Image generation via Grok-4.1 chat",
             is_image=True,
@@ -151,6 +166,7 @@ class ModelService:
             grok_model="grok-3",
             model_mode="MODEL_MODE_FAST",
             cost=Cost.HIGH,
+            pool_routing=PoolRouting.SUPER_THEN_BASIC,
             display_name="Grok Image",
             description="Image generation model",
             is_image=True,
@@ -160,6 +176,7 @@ class ModelService:
             grok_model="imagine-image-edit",
             model_mode="MODEL_MODE_FAST",
             cost=Cost.HIGH,
+            pool_routing=PoolRouting.SUPER_THEN_BASIC,
             display_name="Grok Image Edit",
             description="Image edit model",
             is_image=True,
@@ -169,6 +186,7 @@ class ModelService:
             grok_model="grok-3",
             model_mode="MODEL_MODE_FAST",
             cost=Cost.HIGH,
+            pool_routing=PoolRouting.SUPER_THEN_BASIC,
             display_name="Grok Video",
             description="Video generation model",
             is_video=True,
@@ -217,18 +235,18 @@ class ModelService:
     @classmethod
     def pool_for_model(cls, model_id: str) -> str:
         """根据模型选择 Token 池"""
-        model = cls.get(model_id)
-        if model and model.tier == Tier.SUPER:
-            return "ssoSuper"
-        return "ssoBasic"
+        return cls.pool_candidates_for_model(model_id)[0]
 
     @classmethod
     def pool_candidates_for_model(cls, model_id: str) -> List[str]:
         """按优先级返回可用 Token 池列表"""
         model = cls.get(model_id)
-        if model and model.tier == Tier.SUPER:
+        if not model:
+            return ["ssoBasic", "ssoSuper"]
+        if model.pool_routing == PoolRouting.SUPER_ONLY:
             return ["ssoSuper"]
-        # 基础模型优先使用 basic 池，缺失时可回退到 super 池
+        if model.pool_routing == PoolRouting.SUPER_THEN_BASIC:
+            return ["ssoSuper", "ssoBasic"]
         return ["ssoBasic", "ssoSuper"]
 
 
