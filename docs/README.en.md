@@ -175,15 +175,18 @@ Note: when `grok.image_ws=true`, `size` is mapped to aspect ratio (only 5 suppor
 <br>
 
 ### `POST /v1/images/edits`
-> Image edit endpoint (multipart/form-data)
+> Image edit endpoint (JSON body)
 
 ```bash
 curl http://localhost:8000/v1/images/edits \
   -H "Authorization: Bearer $GROK2API_API_KEY" \
-  -F "model=grok-imagine-1.0-edit" \
-  -F "prompt=Make it sharper" \
-  -F "image=@/path/to/image.png" \
-  -F "n=1"
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "grok-imagine-image-edit",
+    "prompt": "Make it sharper",
+    "image": ["https://example.com/image.png"],
+    "n": 1
+  }'
 ```
 
 <details>
@@ -193,9 +196,9 @@ curl http://localhost:8000/v1/images/edits \
 
 | Field | Type | Description | Allowed values |
 | :--- | :--- | :--- | :--- |
-| `model` | string | Image model ID | `grok-imagine-1.0-edit` |
+| `model` | string | Image model ID | `grok-imagine-image-edit` |
 | `prompt` | string | Edit prompt | - |
-| `image` | file | Image file | `png`, `jpg`, `webp` |
+| `image` | string[] | Image URL / data URL list | at least 1 image, max 16 |
 | `n` | integer | Number of images | `1` - `10` (streaming: `1` or `2` only) |
 | `stream` | boolean | Enable streaming | `true`, `false` |
 | `size` | string | Image size | `1024x1024` (not customizable yet) |

@@ -201,15 +201,18 @@ curl http://localhost:8000/v1/images/generations \
 
 ### `POST /v1/images/edits`
 
-> 图像编辑接口（multipart/form-data）
+> 图像编辑接口（JSON body）
 
 ```bash
 curl http://localhost:8000/v1/images/edits \
   -H "Authorization: Bearer $GROK2API_API_KEY" \
-  -F "model=grok-imagine-1.0-edit" \
-  -F "prompt=把图片变清晰" \
-  -F "image=@/path/to/image.png" \
-  -F "n=1"
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "grok-imagine-image-edit",
+    "prompt": "把图片变清晰",
+    "image": ["https://example.com/image.png"],
+    "n": 1
+  }'
 ```
 
 <details>
@@ -219,9 +222,9 @@ curl http://localhost:8000/v1/images/edits \
 
 | 字段                | 类型    | 说明             | 可用参数                                     |
 | :------------------ | :------ | :--------------- | :------------------------------------------- |
-| `model`           | string  | 图像模型名       | `grok-imagine-1.0-edit`                    |
+| `model`           | string  | 图像模型名       | `grok-imagine-image-edit`                    |
 | `prompt`          | string  | 编辑描述         | -                                            |
-| `image`           | file    | 待编辑图片       | `png`, `jpg`, `webp`                   |
+| `image`           | string[] | 待编辑图片 URL / data URL 列表 | 至少 1 张，最多 16 张 |
 | `n`               | integer | 生成数量         | `1` - `10` (流式模式仅限 `1` 或 `2`) |
 | `stream`          | boolean | 是否开启流式输出 | `true`, `false`                          |
 | `size`            | string  | 图片尺寸         | `1024x1024` (暂不支持自定义)               |

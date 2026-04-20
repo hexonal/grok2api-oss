@@ -3,15 +3,13 @@ Image Generation API 路由
 """
 
 import asyncio
-import base64
 import math
 import random
 import re
 import time
-from pathlib import Path
 from typing import List, Optional, Union
 
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import APIRouter
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
@@ -79,7 +77,7 @@ class ImageEditRequest(BaseModel):
 
     prompt: str = Field(..., description="编辑描述")
     model: Optional[str] = Field(DEFAULT_IMAGE_EDIT_MODEL, description="模型名称")
-    image: Optional[Union[str, List[str]]] = Field(None, description="待编辑图片文件")
+    image: Optional[List[str]] = Field(None, description="待编辑图片 URL / data URL 列表")
     n: Optional[int] = Field(1, ge=1, le=10, description="生成数量 (1-10)")
     size: Optional[str] = Field("1024x1024", description="图片尺寸 (暂不支持)")
     quality: Optional[str] = Field("standard", description="图片质量 (暂不支持)")
@@ -264,7 +262,7 @@ def resolve_aspect_ratio(size: str) -> str:
     return mapping.get(size) or "2:3"
 
 
-def validate_edit_request(request: ImageEditRequest, images: List[UploadFile]):
+def validate_edit_request(request: ImageEditRequest):
     """验证图片编辑请求参数"""
     request.model = normalize_edit_model(request.model)
     if request.model not in IMAGE_EDIT_MODEL_IDS:
@@ -276,13 +274,13 @@ def validate_edit_request(request: ImageEditRequest, images: List[UploadFile]):
     _validate_common_request(request, allow_ws_stream=False)
     _validate_image_model_count(request.model, request.n)
     _validate_imagine_image_size(request.model, request.size)
-    if not images:
+    if not request.image:
         raise ValidationException(
             message="Image is required",
             param="image",
             code="missing_image",
         )
-    if len(images) > 16:
+    if len(request.image) > 16:
         raise ValidationException(
             message="Too many images. Maximum is 16.",
             param="image",
@@ -875,41 +873,28 @@ async def create_image(request: ImageGenerationRequest):
 
 
 @router.post("/images/edits")
-async def edit_image(
-    prompt: str = Form(...),
-    image: List[UploadFile] = File(...),
-    model: Optional[str] = Form(DEFAULT_IMAGE_EDIT_MODEL),
-    n: int = Form(1),
-    size: str = Form("1024x1024"),
-    quality: str = Form("standard"),
-    response_format: Optional[str] = Form(None),
-    style: Optional[str] = Form(None),
-    stream: Optional[bool] = Form(False),
-):
+async def edit_image(request: ImageEditRequest):
     """
     Image Edits API
 
-    同官方 API 格式，仅支持 multipart/form-data 文件上传
+    使用 JSON body 提交 image URL / data URL 列表
     """
-    if response_format is None:
-        response_format = resolve_response_format(None)
+    if request.response_format is None:
+        request.response_format = resolve_response_format(None)
 
     logger.info(
-        f"Image edit request: prompt='{prompt}', model={model}, "
-        f"n={n}, size={size}, format={response_format}, stream={stream}, images={len(image)}"
+        f"Image edit request: prompt='{request.prompt}', model={request.model}, "
+        f"n={request.n}, size={request.size}, format={request.response_format}, "
+        f"stream={request.stream}, images={len(request.image or [])}"
     )
 
     try:
-        edit_request = ImageEditRequest(
-            prompt=prompt,
-            model=model,
-            n=n,
-            size=size,
-            quality=quality,
-            response_format=response_format,
-            style=style,
-            stream=stream,
-        )
+        if request.stream is None:
+            request.stream = False
+        response_format = resolve_response_format(request.response_format)
+        request.response_format = response_format
+        response_field = response_field_name(response_format)
+        validate_edit_request(request)
     except ValidationError as exc:
         errors = exc.errors()
         if errors:
@@ -924,142 +909,17 @@ async def edit_image(
             raise ValidationException(message=msg, param=param, code=code)
         raise ValidationException(message="Invalid request", code="invalid_value")
 
-    if edit_request.stream is None:
-        edit_request.stream = False
-
-    response_format = resolve_response_format(edit_request.response_format)
-    edit_request.response_format = response_format
-    response_field = response_field_name(response_format)
-
-    # 参数验证
-    validate_edit_request(edit_request, image)
-
-    max_image_bytes = 50 * 1024 * 1024
-    allowed_types = {"image/png", "image/jpeg", "image/webp", "image/jpg"}
-
-    images: List[str] = []
-    for item in image:
-        content = await item.read()
-        await item.close()
-        if not content:
-            raise ValidationException(
-                message="File content is empty",
-                param="image",
-                code="empty_file",
-            )
-        if len(content) > max_image_bytes:
-            raise ValidationException(
-                message="Image file too large. Maximum is 50MB.",
-                param="image",
-                code="file_too_large",
-            )
-        mime = (item.content_type or "").lower()
-        if mime == "image/jpg":
-            mime = "image/jpeg"
-        ext = Path(item.filename or "").suffix.lower()
-        if mime not in allowed_types:
-            if ext in (".jpg", ".jpeg"):
-                mime = "image/jpeg"
-            elif ext == ".png":
-                mime = "image/png"
-            elif ext == ".webp":
-                mime = "image/webp"
-            else:
-                raise ValidationException(
-                    message="Unsupported image type. Supported: png, jpg, webp.",
-                    param="image",
-                    code="invalid_image_type",
-                )
-        b64 = base64.b64encode(content).decode()
-        images.append(f"data:{mime};base64,{b64}")
-
     # 获取 token 和模型信息
-    token_mgr, token = await _get_token(edit_request.model)
-    model_info = ModelService.get(edit_request.model)
-
-    # 上传图片
-    image_urls: List[str] = []
-    upload_service = UploadService()
-    try:
-        for image in images:
-            file_id, file_uri = await upload_service.upload(image, token)
-            if file_uri:
-                if file_uri.startswith("http"):
-                    image_urls.append(file_uri)
-                else:
-                    image_urls.append(f"https://assets.grok.com/{file_uri.lstrip('/')}")
-    finally:
-        await upload_service.close()
-
-    if not image_urls:
-        raise AppException(
-            message="Image upload failed",
-            error_type=ErrorType.SERVER.value,
-            code="upload_failed",
-        )
-
-    parent_post_id = None
-    try:
-        media_service = VideoService()
-        parent_post_id = await media_service.create_image_post(token, image_urls[0])
-        logger.debug(f"Parent post ID: {parent_post_id}")
-    except Exception as e:
-        logger.warning(f"Create image post failed: {e}")
-
-    if not parent_post_id:
-        for url in image_urls:
-            match = re.search(r"/generated/([a-f0-9-]+)/", url)
-            if match:
-                parent_post_id = match.group(1)
-                logger.debug(f"Parent post ID: {parent_post_id}")
-                break
-            match = re.search(r"/users/[^/]+/([a-f0-9-]+)/content", url)
-            if match:
-                parent_post_id = match.group(1)
-                logger.debug(f"Parent post ID: {parent_post_id}")
-                break
-
-    model_config_override = {
-        "modelMap": {
-            "imageEditModel": "imagine",
-            "imageEditModelConfig": {
-                "imageReferences": image_urls,
-            },
-        }
-    }
-
-    if parent_post_id:
-        model_config_override["modelMap"]["imageEditModelConfig"]["parentPostId"] = (
-            parent_post_id
-        )
-
-    raw_payload = {
-        "temporary": bool(get_config("chat.temporary")),
-        "modelName": model_info.grok_model,
-        "modelMode": model_info.model_mode,
-        "message": edit_request.prompt,
-        "enableImageGeneration": True,
-        "returnImageBytes": False,
-        "returnRawGrokInXaiRequest": False,
-        "enableImageStreaming": True,
-        "imageGenerationCount": 2,
-        "forceConcise": False,
-        "toolOverrides": {"imageGen": True},
-        "enableSideBySide": True,
-        "sendFinalMetadata": True,
-        "isReasoning": False,
-        "disableTextFollowUps": True,
-        "responseMetadata": {"modelConfigOverride": model_config_override},
-        "disableMemory": False,
-        "forceSideBySide": False,
-    }
+    token_mgr, token = await _get_token(request.model)
+    model_info = ModelService.get(request.model)
+    raw_payload = await _prepare_img2img(token, request.image, request.prompt, model_info)
 
     # 流式模式
-    if edit_request.stream:
+    if request.stream:
         chat_service = GrokChatService()
         response = await chat_service.chat(
             token=token,
-            message=edit_request.prompt,
+            message=request.prompt,
             model=model_info.grok_model,
             mode=None,
             stream=True,
@@ -1069,7 +929,7 @@ async def edit_image(
         processor = ImageStreamProcessor(
             model_info.model_id,
             token,
-            n=edit_request.n,
+            n=request.n,
             response_format=response_format,
         )
 
@@ -1082,7 +942,7 @@ async def edit_image(
         )
 
     # 非流式模式
-    n = edit_request.n
+    n = request.n
     rate_limited = False
     calls_needed = (n + 1) // 2
 
@@ -1091,7 +951,7 @@ async def edit_image(
             chat_service = GrokChatService()
             response = await chat_service.chat(
                 token=token,
-                message=edit_request.prompt,
+                message=request.prompt,
                 model=model_info.grok_model,
                 mode=None,
                 stream=True,

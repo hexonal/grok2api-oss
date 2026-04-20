@@ -76,23 +76,38 @@ def test_image_edit_requires_dedicated_edit_model():
     request = ImageEditRequest(
         prompt="sharpen this image",
         model="grok-imagine-image",
+        image=["https://example.com/ref.png"],
         n=1,
         size="1024x1024",
     )
 
     with pytest.raises(ValidationException):
-        validate_edit_request(request, images=[object()])
+        validate_edit_request(request)
 
 
 def test_image_edit_accepts_public_edit_model():
     request = ImageEditRequest(
         prompt="sharpen this image",
         model="grok-imagine-image-edit",
+        image=["https://example.com/ref.png"],
         n=2,
         size="1024x1024",
     )
 
-    validate_edit_request(request, images=[object()])
+    validate_edit_request(request)
+
+
+def test_image_edit_requires_json_image_list():
+    request = ImageEditRequest(
+        prompt="sharpen this image",
+        model="grok-imagine-image-edit",
+        image=[],
+        n=1,
+        size="1024x1024",
+    )
+
+    with pytest.raises(ValidationException):
+        validate_edit_request(request)
 
 
 def test_generation_size_is_restricted_for_official_imagine_models():
