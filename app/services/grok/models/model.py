@@ -282,6 +282,38 @@ class ModelService:
         return not model.is_image and not model.is_video
 
     @classmethod
+    def ensure_chat_compatible(cls, model_id: str) -> None:
+        """确保模型可用于 /v1/chat/completions"""
+        model = cls.get(model_id)
+        if not model:
+            raise ValidationException(
+                message=(
+                    f"The model `{model_id}` does not exist or you do not have access to it."
+                ),
+                param="model",
+                code="model_not_found",
+            )
+        if model.is_image:
+            raise ValidationException(
+                message=(
+                    f"The model `{model_id}` does not support `/v1/chat/completions`. "
+                    "Use `/v1/images/generations` for image generation or "
+                    "`/v1/images/edits` for image editing."
+                ),
+                param="model",
+                code="model_not_supported",
+            )
+        if model.is_video:
+            raise ValidationException(
+                message=(
+                    f"The model `{model_id}` does not support `/v1/chat/completions`. "
+                    "Use `/v1/videos` instead."
+                ),
+                param="model",
+                code="model_not_supported",
+            )
+
+    @classmethod
     def pool_for_model(cls, model_id: str) -> str:
         """根据模型选择 Token 池"""
         return cls.pool_candidates_for_model(model_id)[0]

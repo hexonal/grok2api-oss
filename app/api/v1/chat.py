@@ -143,12 +143,7 @@ class ChatCompletionRequest(BaseModel):
 def validate_request(request: ChatCompletionRequest):
     """验证请求参数"""
     # 验证模型
-    if not ModelService.valid(request.model):
-        raise ValidationException(
-            message=f"The model `{request.model}` does not exist or you do not have access to it.",
-            param="model",
-            code="model_not_found",
-        )
+    ModelService.ensure_chat_compatible(request.model)
 
     # 验证消息
     for idx, msg in enumerate(request.messages):
@@ -257,31 +252,12 @@ async def chat_completions(request: ChatCompletionRequest):
 
     logger.debug(f"Chat request: model={request.model}, stream={request.stream}")
 
-    # 检测视频模型
-    model_info = ModelService.get(request.model)
-    if model_info and model_info.is_video:
-        from app.services.grok.services.media import VideoService
-
-        # 提取视频配置 (默认值在 Pydantic 模型中处理)
-        v_conf = request.video_config or VideoConfig()
-
-        result = await VideoService.completions(
-            model=request.model,
-            messages=[msg.model_dump() for msg in request.messages],
-            stream=request.stream,
-            thinking=request.thinking,
-            aspect_ratio=v_conf.aspect_ratio,
-            video_length=v_conf.video_length,
-            resolution=v_conf.resolution_name,
-            preset=v_conf.preset,
-        )
-    else:
-        result = await ChatService.completions(
-            model=request.model,
-            messages=[msg.model_dump() for msg in request.messages],
-            stream=request.stream,
-            thinking=request.thinking,
-        )
+    result = await ChatService.completions(
+        model=request.model,
+        messages=[msg.model_dump() for msg in request.messages],
+        stream=request.stream,
+        thinking=request.thinking,
+    )
 
     if isinstance(result, dict):
         return JSONResponse(content=result)

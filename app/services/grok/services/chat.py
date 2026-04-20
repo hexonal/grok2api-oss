@@ -439,6 +439,8 @@ class ChatService:
         thinking: str = None,
     ):
         """Chat Completions 入口"""
+        ModelService.ensure_chat_compatible(model)
+
         # 获取 token
         token_mgr = await get_token_manager()
         await token_mgr.reload_if_stale()

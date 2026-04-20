@@ -89,19 +89,21 @@ docker compose up -d
 
 ### 可用模型
 
-| 模型名                     | 计次 | 可用账号    | 对话功能 | 图像功能 | 视频功能 |
-| :------------------------- | :--: | :---------- | :------: | :------: | :------: |
-| `grok-3`                 |  1  | Basic/Super |   支持   |   支持   |    -    |
-| `grok-3-fast`            |  1  | Basic/Super |   支持   |   支持   |    -    |
-| `grok-4`                 |  1  | Basic/Super |   支持   |   支持   |    -    |
-| `grok-4-mini`            |  1  | Basic/Super |   支持   |   支持   |    -    |
-| `grok-4-fast`            |  1  | Basic/Super |   支持   |   支持   |    -    |
-| `grok-4-heavy`           |  4  | Super       |   支持   |   支持   |    -    |
-| `grok-4.1`               |  1  | Basic/Super |   支持   |   支持   |    -    |
-| `grok-4.1-thinking`      |  4  | Basic/Super |   支持   |   支持   |    -    |
-| `grok-imagine-1.0`       |  4  | Basic/Super |    -    |   支持   |    -    |
-| `grok-imagine-1.0-edit`  |  4  | Basic/Super |    -    |   支持   |    -    |
-| `grok-imagine-1.0-video` |  -  | Basic/Super |    -    |    -    |   支持   |
+| 模型名                     | 计次 | 可用账号    | 文本对话 | 视觉理解 | 图片生成 | 视频生成 |
+| :------------------------- | :--: | :---------- | :------: | :------: | :------: | :------: |
+| `grok-3`                 |  1  | Basic/Super |   支持   |   支持   |    -    |    -    |
+| `grok-3-fast`            |  1  | Basic/Super |   支持   |   支持   |    -    |    -    |
+| `grok-4`                 |  1  | Basic/Super |   支持   |   支持   |    -    |    -    |
+| `grok-4-mini`            |  1  | Basic/Super |   支持   |   支持   |    -    |    -    |
+| `grok-4-fast`            |  1  | Basic/Super |   支持   |   支持   |    -    |    -    |
+| `grok-4-heavy`           |  4  | Super       |   支持   |   支持   |    -    |    -    |
+| `grok-4.1`               |  1  | Basic/Super |   支持   |   支持   |    -    |    -    |
+| `grok-4.1-thinking`      |  4  | Basic/Super |   支持   |   支持   |    -    |    -    |
+| `grok-imagine-1.0`       |  4  | Basic/Super |    -    |    -    |   支持   |    -    |
+| `grok-imagine-1.0-edit`  |  4  | Basic/Super |    -    |    -    |   支持   |    -    |
+| `grok-imagine-1.0-video` |  -  | Basic/Super |    -    |    -    |    -    |   支持   |
+
+注：这里的“视觉理解”指文本模型在 `/v1/chat/completions` 中通过 `image_url` 看图理解，不代表文本模型可以生成图片。
 
 <br>
 
@@ -109,7 +111,7 @@ docker compose up -d
 
 ### `POST /v1/chat/completions`
 
-> 通用接口，支持对话聊天、图像生成、图像编辑、视频生成、视频超分
+> 文本对话接口，仅支持文本聊天模型。文本模型仍可通过 `messages[].content[].image_url` 做视觉理解；图片模型请使用 `/v1/images/*`，视频模型请使用 `/v1/videos`。
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -132,11 +134,6 @@ curl http://localhost:8000/v1/chat/completions \
 | `messages`            | array   | 消息列表                       | 见下方消息格式                                |
 | `stream`              | boolean | 是否开启流式输出               | `true`, `false`                           |
 | `thinking`            | string  | 思维链模式                     | `enabled`, `disabled`, `null`           |
-| `video_config`        | object  | **视频模型专用配置对象** | -                                             |
-| └─`aspect_ratio`    | string  | 视频宽高比                     | `16:9`, `9:16`, `1:1`, `2:3`, `3:2` |
-| └─`video_length`    | integer | 视频时长 (秒)                  | `6`, `10`, `15`                         |
-| └─`resolution_name` | string  | 分辨率                         | `480p`, `720p`                            |
-| └─`preset`          | string  | 风格预设                       | `fun`, `normal`, `spicy`, `custom`    |
 
 **消息格式 (messages)**：
 

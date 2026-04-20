@@ -82,26 +82,28 @@ Default password: `grok2api` (config key `app.app_key`, change it in production)
 
 ### Models
 
-| Model | Cost | Account | Chat | Image | Video |
-| :--- | :---: | :--- | :---: | :---: | :---: |
-| `grok-3` | 1 | Basic/Super | Yes | Yes | - |
-| `grok-3-fast` | 1 | Basic/Super | Yes | Yes | - |
-| `grok-4` | 1 | Basic/Super | Yes | Yes | - |
-| `grok-4-mini` | 1 | Basic/Super | Yes | Yes | - |
-| `grok-4-fast` | 1 | Basic/Super | Yes | Yes | - |
-| `grok-4-heavy` | 4 | Super | Yes | Yes | - |
-| `grok-4.1` | 1 | Basic/Super | Yes | Yes | - |
-| `grok-4.1-thinking` | 4 | Basic/Super | Yes | Yes | - |
-| `grok-imagine-1.0` | 4 | Basic/Super | - | Yes | - |
-| `grok-imagine-1.0-edit` | 4 | Basic/Super | - | Yes | - |
-| `grok-imagine-1.0-video` | - | Basic/Super | - | - | Yes |
+| Model | Cost | Account | Text Chat | Vision | Image Generation | Video Generation |
+| :--- | :---: | :--- | :---: | :---: | :---: | :---: |
+| `grok-3` | 1 | Basic/Super | Yes | Yes | - | - |
+| `grok-3-fast` | 1 | Basic/Super | Yes | Yes | - | - |
+| `grok-4` | 1 | Basic/Super | Yes | Yes | - | - |
+| `grok-4-mini` | 1 | Basic/Super | Yes | Yes | - | - |
+| `grok-4-fast` | 1 | Basic/Super | Yes | Yes | - | - |
+| `grok-4-heavy` | 4 | Super | Yes | Yes | - | - |
+| `grok-4.1` | 1 | Basic/Super | Yes | Yes | - | - |
+| `grok-4.1-thinking` | 4 | Basic/Super | Yes | Yes | - | - |
+| `grok-imagine-1.0` | 4 | Basic/Super | - | - | Yes | - |
+| `grok-imagine-1.0-edit` | 4 | Basic/Super | - | - | Yes | - |
+| `grok-imagine-1.0-video` | - | Basic/Super | - | - | - | Yes |
+
+Note: “Vision” means a text model can understand images passed via `image_url` in `/v1/chat/completions`. It does not mean the text model can generate images.
 
 <br>
 
 ## API
 
 ### `POST /v1/chat/completions`
-> Generic endpoint: chat, image generation, image editing, video generation, video upscaling
+> Text chat endpoint only. Text models can still use `messages[].content[].image_url` for vision. Image models must use `/v1/images/*`, and video models must use `/v1/videos`.
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -124,11 +126,6 @@ curl http://localhost:8000/v1/chat/completions \
 | `messages` | array | Message list | `developer`, `system`, `user`, `assistant` |
 | `stream` | boolean | Enable streaming | `true`, `false` |
 | `thinking` | string | Thinking mode | `enabled`, `disabled`, `null` |
-| `video_config` | object | **Video model only** | - |
-| └─ `aspect_ratio` | string | Video aspect ratio | `16:9`, `9:16`, `1:1`, `2:3`, `3:2` |
-| └─ `video_length` | integer | Video length (seconds) | `6`, `10`, `15` |
-| └─ `resolution_name` | string | Resolution | `480p`, `720p` |
-| └─ `preset` | string | Style preset | `fun`, `normal`, `spicy` |
 
 Note: any other parameters will be discarded and ignored.
 
