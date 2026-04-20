@@ -196,13 +196,24 @@ def _validate_common_request(
 
 def validate_generation_request(request: ImageGenerationRequest):
     """验证图片生成请求参数"""
-    request.model = normalize_generation_model(request.model)
     image_models = _generation_model_ids()
-    if request.model not in image_models:
+    generation_model = normalize_generation_model(request.model)
+    edit_model = normalize_edit_model(request.model)
+
+    if request.image and edit_model in IMAGE_EDIT_MODEL_IDS:
+        request.model = edit_model
+    else:
+        request.model = generation_model
+
+    allowed_models = image_models.copy()
+    if request.image:
+        allowed_models.extend(sorted(IMAGE_EDIT_MODEL_IDS))
+
+    if request.model not in allowed_models:
         raise ValidationException(
             message=(
                 f"The model `{request.model}` is not supported for image generation. "
-                f"Supported: {image_models}"
+                f"Supported: {allowed_models}"
             ),
             param="model",
             code="model_not_supported",

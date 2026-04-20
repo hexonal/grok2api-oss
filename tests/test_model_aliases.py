@@ -136,6 +136,22 @@ def test_img2img_uses_edit_runtime_model():
     assert runtime_model.model_id == DEFAULT_IMAGE_EDIT_MODEL
 
 
+def test_img2img_accepts_public_edit_model_on_generations_endpoint():
+    request = ImageGenerationRequest(
+        prompt="draw a dragon",
+        model="grok-imagine-image-edit",
+        image=["https://example.com/ref.jpg"],
+        n=1,
+        size="1024x1024",
+    )
+
+    validate_generation_request(request)
+    runtime_model = resolve_generation_runtime_model(request)
+
+    assert request.model == DEFAULT_IMAGE_EDIT_MODEL
+    assert runtime_model.model_id == DEFAULT_IMAGE_EDIT_MODEL
+
+
 def test_img2img_streaming_allows_url_response_format():
     request = ImageGenerationRequest(
         prompt="draw a dragon",
