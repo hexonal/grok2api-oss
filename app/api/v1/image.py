@@ -52,6 +52,8 @@ OFFICIAL_IMAGE_MODELS = {
     "grok-imagine-image",
     "grok-imagine-image-pro",
 }
+_IMAGE_WS_CIRCUIT_UNTIL: dict[str, float] = {}
+_IMAGE_WS_FAILURE_COUNT: dict[str, int] = {}
 IMAGE_EDIT_MODEL_IDS = {
     DEFAULT_IMAGE_EDIT_MODEL,
     "grok-imagine-1.0-edit",
@@ -401,7 +403,19 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     if isinstance(code, str) and code == "rate_limit_exceeded":
         return True
 
+    details = getattr(exc, "details", None)
+    detail_text = ""
+    if isinstance(details, dict):
+        detail_code = str(details.get("error_code") or details.get("code") or "")
+        if detail_code == "rate_limit_exceeded":
+            return True
+        detail_text = " ".join(
+            str(details.get(key) or "") for key in ("error", "message")
+        )
+
     message = str(exc).lower()
+    if detail_text:
+        message = f"{message} {detail_text.lower()}"
     if not message:
         return False
 
@@ -410,6 +424,79 @@ def _is_rate_limit_error(exc: Exception) -> bool:
         or "rate limit exceeded" in message
         or "too many requests" in message
     )
+
+
+def _image_ws_auth_status_code(exc: Exception) -> Optional[int]:
+    """识别 WebSocket 认证类失败，避免误记为图片限流。"""
+    details = getattr(exc, "details", None)
+    parts = [str(exc)]
+    if isinstance(details, dict):
+        parts.extend(str(details.get(key) or "") for key in ("error_code", "error"))
+    text = " ".join(parts).lower()
+
+    if "403" in text or "forbidden" in text:
+        return 403
+    if "401" in text or "unauthorized" in text:
+        return 401
+    return None
+
+
+def _config_int(key: str, default: int, minimum: int = 0) -> int:
+    try:
+        value = int(get_config(key, default))
+    except Exception:
+        value = default
+    return max(minimum, value)
+
+
+def _config_float(key: str, default: float, minimum: float = 0.0) -> float:
+    try:
+        value = float(get_config(key, default))
+    except Exception:
+        value = default
+    return max(minimum, value)
+
+
+def _image_ws_max_token_attempts() -> int:
+    return _config_int("image.image_ws_max_token_attempts", 3, 1)
+
+
+def _image_ws_circuit_open(model_id: str) -> bool:
+    until = _IMAGE_WS_CIRCUIT_UNTIL.get(model_id, 0.0)
+    if until <= time.time():
+        _IMAGE_WS_CIRCUIT_UNTIL.pop(model_id, None)
+        return False
+
+    remaining = max(0.0, until - time.time())
+    logger.warning(
+        f"Image WS circuit open: model={model_id}, retry_after={remaining:.1f}s"
+    )
+    return True
+
+
+def _record_image_ws_rate_limit(model_id: str) -> bool:
+    threshold = _config_int("image.image_ws_circuit_breaker_threshold", 3, 0)
+    if threshold <= 0:
+        return False
+
+    count = _IMAGE_WS_FAILURE_COUNT.get(model_id, 0) + 1
+    if count < threshold:
+        _IMAGE_WS_FAILURE_COUNT[model_id] = count
+        return False
+
+    seconds = _config_float("image.image_ws_circuit_breaker_seconds", 300.0, 1.0)
+    _IMAGE_WS_FAILURE_COUNT[model_id] = 0
+    _IMAGE_WS_CIRCUIT_UNTIL[model_id] = time.time() + seconds
+    logger.warning(
+        f"Image WS circuit opened: model={model_id}, threshold={threshold}, "
+        f"cooldown={seconds:.1f}s"
+    )
+    return True
+
+
+def _reset_image_ws_circuit(model_id: str):
+    _IMAGE_WS_FAILURE_COUNT.pop(model_id, None)
+    _IMAGE_WS_CIRCUIT_UNTIL.pop(model_id, None)
 
 
 def _new_rate_limit_exception() -> AppException:
@@ -627,7 +714,7 @@ async def create_image(request: ImageGenerationRequest):
     response_format = resolve_response_format(request.response_format)
     response_field = response_field_name(response_format)
 
-    # 获取 token 和模型信息
+    # 获取模型信息
     model_info = resolve_generation_runtime_model(request)
     if not model_info:
         raise ValidationException(
@@ -635,10 +722,13 @@ async def create_image(request: ImageGenerationRequest):
             param="model",
             code="model_not_supported",
         )
-    token_mgr, token = await _get_token(model_info.model_id)
     has_images = bool(request.image)
     # 有参考图片时走 HTTP img2img，不走 WebSocket
     use_ws = bool(get_config("image.image_ws")) and not has_images
+    if use_ws and _image_ws_circuit_open(model_info.model_id):
+        raise _new_rate_limit_exception()
+
+    token_mgr, token = await _get_token(model_info.model_id)
 
     # img2img: 预处理上传图片并构建 raw_payload
     img2img_payload = None
@@ -813,9 +903,13 @@ async def create_image(request: ImageGenerationRequest):
         calls_needed = min(calls_needed, n)
         attempted_tokens: set[str] = set()
         current_token = token
+        max_token_attempts = _image_ws_max_token_attempts()
+        token_attempts = 0
 
-        while current_token:
+        while current_token and token_attempts < max_token_attempts:
+            token_attempts += 1
             current_rate_limited = False
+            current_auth_status = None
 
             async def _fetch_batch(call_target: int):
                 upstream = image_service.stream(
@@ -843,7 +937,10 @@ async def create_image(request: ImageGenerationRequest):
             for batch in results:
                 if isinstance(batch, Exception):
                     logger.warning(f"WS batch failed: {batch}")
-                    if _is_rate_limit_error(batch):
+                    auth_status = _image_ws_auth_status_code(batch)
+                    if auth_status:
+                        current_auth_status = auth_status
+                    elif _is_rate_limit_error(batch):
                         current_rate_limited = True
                     continue
                 for img in batch:
@@ -856,33 +953,59 @@ async def create_image(request: ImageGenerationRequest):
                     break
 
             if all_images:
+                _reset_image_ws_circuit(model_info.model_id)
                 try:
                     await token_mgr.consume(current_token, _get_effort(model_info))
                 except Exception as e:
                     logger.warning(f"Failed to consume token: {e}")
                 break
 
-            if not current_rate_limited:
+            if not current_rate_limited and not current_auth_status:
                 break
 
-            rate_limited = True
             limited_token = current_token
-            await token_mgr.record_fail(
-                limited_token,
-                429,
-                "Image WebSocket rate limit exceeded",
-            )
+            if current_rate_limited:
+                rate_limited = True
+                await token_mgr.record_fail(
+                    limited_token,
+                    429,
+                    "Image WebSocket rate limit exceeded",
+                )
+                if _record_image_ws_rate_limit(model_info.model_id):
+                    current_token = None
+                    break
+            else:
+                await token_mgr.record_fail(
+                    limited_token,
+                    current_auth_status,
+                    "Image WebSocket authentication failed",
+                )
+
             attempted_tokens.add(_raw_token(limited_token))
             current_token = _select_model_token(
                 token_mgr,
                 model_info.model_id,
                 attempted_tokens,
             )
-            if current_token:
+            if current_token and token_attempts < max_token_attempts:
+                if current_rate_limited:
+                    reason = "rate limited"
+                else:
+                    reason = f"auth failed ({current_auth_status})"
                 logger.warning(
-                    f"Image WS token rate limited: token={limited_token[:10]}..., "
+                    f"Image WS token {reason}: token={limited_token[:10]}..., "
                     f"trying next token={current_token[:10]}..."
                 )
+            elif current_token:
+                logger.warning(
+                    f"Image WS token attempt limit reached before next token: "
+                    f"model={model_info.model_id}, attempts={token_attempts}"
+                )
+        if current_token and token_attempts >= max_token_attempts and not all_images:
+            logger.warning(
+                f"Image WS token attempt limit reached: model={model_info.model_id}, "
+                f"attempts={token_attempts}"
+            )
         usage_override = {
             "total_tokens": 0,
             "input_tokens": 0,

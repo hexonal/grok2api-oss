@@ -84,6 +84,12 @@ image_ws_blocked_seconds = 15
 image_ws_final_min_bytes = 100000
 # 判定为中等质量图的最小字节数
 image_ws_medium_min_bytes = 30000
+# 单次图片 WebSocket 请求最多尝试的 token 数
+image_ws_max_token_attempts = 3
+# 连续图片 WebSocket 429 达到该阈值后打开熔断；0 表示禁用
+image_ws_circuit_breaker_threshold = 3
+# 图片 WebSocket 熔断持续秒数
+image_ws_circuit_breaker_seconds = 300
 
 
 # ==================== Token 池管理 ====================
