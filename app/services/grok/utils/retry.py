@@ -21,10 +21,11 @@ from app.core.exceptions import UpstreamException
 class RetryContext:
     """重试上下文"""
 
-    def __init__(self):
+    def __init__(self, retry_codes: Optional[list[int]] = None):
         self.attempt = 0
         self.max_retry = int(get_config("retry.max_retry"))
-        self.retry_codes = get_config("retry.retry_status_codes")
+        config_codes = get_config("retry.retry_status_codes")
+        self.retry_codes = retry_codes if retry_codes is not None else config_codes
         self.last_error = None
         self.last_status = None
         self.total_delay = 0.0
@@ -132,6 +133,7 @@ async def retry_on_status(
     *args,
     extract_status: Callable[[Exception], Optional[int]] = None,
     on_retry: Callable[[int, int, Exception, float], None] = None,
+    retry_codes: Optional[list[int]] = None,
     **kwargs,
 ) -> Any:
     """
@@ -142,6 +144,7 @@ async def retry_on_status(
         *args: 函数参数
         extract_status: 异常提取状态码的函数
         on_retry: 重试时的回调函数 (attempt, status_code, error, delay)
+        retry_codes: 覆盖默认可重试状态码；传 [] 可禁用状态码重试
         **kwargs: 函数关键字参数
 
     Returns:
@@ -150,7 +153,7 @@ async def retry_on_status(
     Raises:
         最后一次失败的异常
     """
-    ctx = RetryContext()
+    ctx = RetryContext(retry_codes=retry_codes)
 
     # 状态码提取器
     if extract_status is None:

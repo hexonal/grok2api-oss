@@ -360,16 +360,26 @@ async def _wrap_stream_with_usage(stream, token_mgr, token, model_info):
                 logger.warning(f"Failed to consume token: {e}")
 
 
-async def _get_token(model: str):
+def _raw_token(token: str) -> str:
+    """去掉 sso= 前缀，统一 token 排除/记录口径"""
+    return token[4:] if token.startswith("sso=") else token
+
+
+def _select_model_token(token_mgr, model: str, exclude_tokens: Optional[set[str]] = None):
+    """按模型候选池选择可用 token"""
+    for pool_name in ModelService.pool_candidates_for_model(model):
+        token = token_mgr.get_token(pool_name, exclude_tokens=exclude_tokens)
+        if token:
+            return token
+    return None
+
+
+async def _get_token(model: str, exclude_tokens: Optional[set[str]] = None):
     """获取可用 token"""
     token_mgr = await get_token_manager()
     await token_mgr.reload_if_stale()
 
-    token = None
-    for pool_name in ModelService.pool_candidates_for_model(model):
-        token = token_mgr.get_token(pool_name)
-        if token:
-            break
+    token = _select_model_token(token_mgr, model, exclude_tokens)
 
     if not token:
         raise AppException(
@@ -442,6 +452,7 @@ async def call_grok(
     file_attachments: Optional[List[str]] = None,
     response_format: str = "b64_json",
     raw_payload: Optional[dict] = None,
+    exclude_tokens: Optional[set[str]] = None,
 ) -> List[str]:
     """调用 Grok 获取图片，返回 base64 列表"""
     chat_service = GrokChatService()
@@ -467,6 +478,28 @@ async def call_grok(
 
     except Exception as e:
         if _is_rate_limit_error(e):
+            await token_mgr.record_fail(token, 429, str(e))
+            attempted_tokens = set(exclude_tokens or set())
+            attempted_tokens.add(_raw_token(token))
+            next_token = _select_model_token(
+                token_mgr,
+                model_info.model_id,
+                attempted_tokens,
+            )
+            if next_token:
+                logger.warning(
+                    f"Image token rate limited: token={token[:10]}..., trying next token"
+                )
+                return await call_grok(
+                    token_mgr,
+                    next_token,
+                    prompt,
+                    model_info,
+                    file_attachments=file_attachments,
+                    response_format=response_format,
+                    raw_payload=raw_payload,
+                    exclude_tokens=attempted_tokens,
+                )
             if isinstance(e, AppException):
                 raise e
             raise _new_rate_limit_exception() from e

@@ -196,116 +196,139 @@ async def _run_video_generation(
     preset: str,
 ) -> None:
     """后台执行视频生成并更新 task 状态"""
-    token_str: Optional[str] = None
     token_mgr = None
 
     try:
-        # 1) 获取 token
         token_mgr = await get_token_manager()
         await token_mgr.reload_if_stale()
 
         pool_candidates = ModelService.pool_candidates_for_model(task.model)
-        token_info = token_mgr.get_token_for_video(
-            resolution=resolution_name,
-            video_length=seconds,
-            pool_candidates=pool_candidates,
-        )
+        attempted_tokens: set[str] = set()
 
-        if not token_info:
-            task.status = "failed"
-            task.error = "No available tokens"
-            return
+        while True:
+            token_info = token_mgr.get_token_for_video(
+                resolution=resolution_name,
+                video_length=seconds,
+                pool_candidates=pool_candidates,
+                exclude_tokens=attempted_tokens,
+            )
 
-        token_str = token_info.token
-        if token_str.startswith("sso="):
-            token_str = token_str[4:]
+            if not token_info:
+                task.status = "failed"
+                task.error = "No available tokens"
+                return
 
-        # 2) 上传图片（图生视频）
-        image_url: Optional[str] = None
-        if image_data_uri:
-            upload_service = UploadService()
+            token_str = token_info.token
+            if token_str.startswith("sso="):
+                token_str = token_str[4:]
+            attempted_tokens.add(token_str)
+
             try:
-                _, file_uri = await upload_service.upload(image_data_uri, token_str)
-                image_url = f"https://assets.grok.com/{file_uri}"
-                logger.info(f"[VideoTask {task.id}] Image uploaded: {image_url}")
-            finally:
-                await upload_service.close()
-
-        # 3) 调用 VideoService 获取流
-        service = VideoService()
-        aspect_ratio = VIDEO_SIZE_TO_ASPECT_RATIO[size]
-        if image_url:
-            response = await service.generate_from_image(
-                token_str,
-                task.prompt,
-                [image_url],
-                aspect_ratio,
-                seconds,
-                resolution_name,
-                preset,
-            )
-        else:
-            response = await service.generate(
-                token_str,
-                task.prompt,
-                aspect_ratio,
-                seconds,
-                resolution_name,
-                preset,
-            )
-
-        # 4) 解析流获取进度和最终 URL
-        idle_timeout = get_config("timeout.video_idle_timeout")
-        processor = BaseProcessor(task.model, token_str)
-
-        try:
-            async for line in _with_idle_timeout(response, idle_timeout, task.model):
-                line = _normalize_stream_line(line)
-                if not line:
-                    continue
-                try:
-                    data = orjson.loads(line)
-                except orjson.JSONDecodeError:
-                    continue
-
-                resp = data.get("result", {}).get("response", {})
-                video_resp = resp.get("streamingVideoGenerationResponse")
-                if not video_resp:
-                    continue
-
-                progress = video_resp.get("progress", 0)
-                task.progress = progress
-
-                if progress == 100:
-                    video_url = video_resp.get("videoUrl", "")
-                    if video_url:
-                        final_url = await processor.process_url(video_url, "video")
-                        task.video_url = final_url
-                        task.status = "completed"
-                        task.completed_at = int(time.time())
-                        logger.info(
-                            f"[VideoTask {task.id}] Completed: {final_url}"
+                image_url: Optional[str] = None
+                if image_data_uri:
+                    upload_service = UploadService()
+                    try:
+                        _, file_uri = await upload_service.upload(
+                            image_data_uri,
+                            token_str,
                         )
-        finally:
-            await processor.close()
+                        image_url = f"https://assets.grok.com/{file_uri}"
+                        logger.info(f"[VideoTask {task.id}] Image uploaded: {image_url}")
+                    finally:
+                        await upload_service.close()
 
-        # 如果流结束但未达到 100%，标记失败
-        if task.status == "processing":
-            task.status = "failed"
-            task.error = "Video generation stream ended without completion"
+                service = VideoService()
+                aspect_ratio = VIDEO_SIZE_TO_ASPECT_RATIO[size]
+                if image_url:
+                    response = await service.generate_from_image(
+                        token_str,
+                        task.prompt,
+                        [image_url],
+                        aspect_ratio,
+                        seconds,
+                        resolution_name,
+                        preset,
+                    )
+                else:
+                    response = await service.generate(
+                        token_str,
+                        task.prompt,
+                        aspect_ratio,
+                        seconds,
+                        resolution_name,
+                        preset,
+                    )
 
-        # 5) 记录 token 消耗
-        if token_mgr and token_str and task.status == "completed":
-            try:
-                model_info = ModelService.get(task.model)
-                effort = (
-                    EffortType.HIGH
-                    if (model_info and model_info.cost.value == "high")
-                    else EffortType.LOW
+                idle_timeout = get_config("timeout.video_idle_timeout")
+                processor = BaseProcessor(task.model, token_str)
+
+                try:
+                    async for line in _with_idle_timeout(
+                        response,
+                        idle_timeout,
+                        task.model,
+                    ):
+                        line = _normalize_stream_line(line)
+                        if not line:
+                            continue
+                        try:
+                            data = orjson.loads(line)
+                        except orjson.JSONDecodeError:
+                            continue
+
+                        resp = data.get("result", {}).get("response", {})
+                        video_resp = resp.get("streamingVideoGenerationResponse")
+                        if not video_resp:
+                            continue
+
+                        progress = video_resp.get("progress", 0)
+                        task.progress = progress
+
+                        if progress == 100:
+                            video_url = video_resp.get("videoUrl", "")
+                            if video_url:
+                                final_url = await processor.process_url(
+                                    video_url,
+                                    "video",
+                                )
+                                task.video_url = final_url
+                                task.status = "completed"
+                                task.completed_at = int(time.time())
+                                logger.info(
+                                    f"[VideoTask {task.id}] Completed: {final_url}"
+                                )
+                finally:
+                    await processor.close()
+
+                if task.status == "processing":
+                    task.status = "failed"
+                    task.error = "Video generation stream ended without completion"
+
+                if token_mgr and token_str and task.status == "completed":
+                    try:
+                        model_info = ModelService.get(task.model)
+                        effort = (
+                            EffortType.HIGH
+                            if (model_info and model_info.cost.value == "high")
+                            else EffortType.LOW
+                        )
+                        await token_mgr.consume(token_str, effort)
+                    except Exception as e:
+                        logger.warning(
+                            f"[VideoTask {task.id}] Failed to record usage: {e}"
+                        )
+                return
+
+            except Exception as exc:
+                status = VideoService._extract_status(exc)
+                if status not in (401, 403, 429):
+                    raise
+
+                await token_mgr.record_fail(token_str, status, str(exc))
+                logger.warning(
+                    f"[VideoTask {task.id}] token failed: token={token_str[:10]}..., "
+                    f"status={status}, trying next token"
                 )
-                await token_mgr.consume(token_str, effort)
-            except Exception as e:
-                logger.warning(f"[VideoTask {task.id}] Failed to record usage: {e}")
 
     except Exception as e:
         logger.error(f"[VideoTask {task.id}] Generation failed: {e}")

@@ -298,8 +298,15 @@ class GrokChatService:
         session = None
         response = None
         try:
+            retry_codes = [
+                code
+                for code in (get_config("retry.retry_status_codes") or [])
+                if code not in (401, 403, 429)
+            ]
             session, response = await retry_on_status(
-                establish_connection, extract_status=extract_status
+                establish_connection,
+                extract_status=extract_status,
+                retry_codes=retry_codes,
             )
         except Exception as e:
             status_code = extract_status(e)
@@ -391,7 +398,7 @@ class ChatService:
         token_mgr,
     ) -> tuple[Any, str, str]:
         attempted_tokens: set[str] = set()
-        last_auth_error: UpstreamException | None = None
+        last_token_error: UpstreamException | None = None
         service = GrokChatService()
 
         for pool_name in ModelService.pool_candidates_for_model(chat_request.model):
@@ -412,17 +419,17 @@ class ChatService:
                     return response, model_name, token
                 except UpstreamException as exc:
                     status = ChatService._extract_status(exc)
-                    if status not in (401, 403):
+                    if status not in (401, 403, 429):
                         raise
 
-                    last_auth_error = exc
+                    last_token_error = exc
                     logger.warning(
-                        f"Chat auth failed: model={chat_request.model}, "
+                        f"Chat token failed: model={chat_request.model}, "
                         f"pool={pool_name}, token={token[:10]}..., trying next token"
                     )
 
-        if last_auth_error:
-            raise last_auth_error
+        if last_token_error:
+            raise last_token_error
 
         raise AppException(
             message="No available tokens. Please try again later.",

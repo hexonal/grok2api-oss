@@ -21,6 +21,7 @@ SUPER_DEFAULT_QUOTA = 140
 # 失败阈值
 FAIL_THRESHOLD = 5
 AUTH_FAIL_FAST_STATUS_CODES = {403}
+RATE_LIMIT_STATUS_CODES = {429}
 
 
 class TokenStatus(str, Enum):
@@ -131,12 +132,22 @@ class TokenInfo(BaseModel):
 
     def record_fail(self, status_code: int = 401, reason: str = ""):
         """记录失败，达到阈值后自动标记为 expired"""
+        now = int(datetime.now().timestamp() * 1000)
+
+        if status_code in RATE_LIMIT_STATUS_CODES:
+            self.last_fail_at = now
+            self.last_fail_reason = reason
+            self.last_sync_at = now
+            self.quota = 0
+            self.status = TokenStatus.COOLING
+            return
+
         # 401/403 错误计入失败（都表示认证/授权失败）
         if status_code not in (401, 403):
             return
 
         self.fail_count += 1
-        self.last_fail_at = int(datetime.now().timestamp() * 1000)
+        self.last_fail_at = now
         self.last_fail_reason = reason
 
         if status_code in AUTH_FAIL_FAST_STATUS_CODES:
@@ -201,4 +212,5 @@ __all__ = [
     "SUPER_DEFAULT_QUOTA",
     "FAIL_THRESHOLD",
     "AUTH_FAIL_FAST_STATUS_CODES",
+    "RATE_LIMIT_STATUS_CODES",
 ]

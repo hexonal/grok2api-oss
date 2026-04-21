@@ -116,7 +116,8 @@ class VideoService:
             if response.status_code != 200:
                 logger.error(f"Create post failed: {response.status_code}")
                 raise UpstreamException(
-                    f"Failed to create post: {response.status_code}"
+                    message=f"Failed to create post: {response.status_code}",
+                    details={"status": response.status_code},
                 )
 
             post_id = response.json().get("post", {}).get("id", "")
@@ -127,6 +128,8 @@ class VideoService:
             return post_id
 
         except AppException:
+            raise
+        except UpstreamException:
             raise
         except Exception as e:
             logger.error(f"Create post error: {e}")
@@ -256,6 +259,8 @@ class VideoService:
             logger.error(f"Video generation error: {e}")
             if isinstance(e, AppException):
                 raise
+            if isinstance(e, UpstreamException):
+                raise
             raise UpstreamException(f"Video generation error: {str(e)}")
 
     async def generate(
@@ -315,6 +320,13 @@ class VideoService:
             )
 
     @staticmethod
+    def _extract_status(error: Exception) -> int | None:
+        """从上游异常里提取 HTTP 状态码"""
+        if isinstance(error, UpstreamException) and error.details:
+            return error.details.get("status")
+        return getattr(error, "status_code", None)
+
+    @staticmethod
     async def completions(
         model: str,
         messages: list,
@@ -326,31 +338,11 @@ class VideoService:
         preset: str = "normal",
     ):
         """视频生成入口"""
-        # 获取 token（使用智能路由）
         token_mgr = await get_token_manager()
         await token_mgr.reload_if_stale()
 
-        # 使用智能路由选择 token（根据视频需求与候选池）
         pool_candidates = ModelService.pool_candidates_for_model(model)
-        token_info = token_mgr.get_token_for_video(
-            resolution=resolution,
-            video_length=video_length,
-            pool_candidates=pool_candidates,
-        )
-
-        if not token_info:
-            raise AppException(
-                message="No available tokens. Please try again later.",
-                error_type=ErrorType.RATE_LIMIT.value,
-                code="rate_limit_exceeded",
-                status_code=429,
-            )
-
-        # 从 TokenInfo 对象中提取 token 字符串
-        token = token_info.token
-        if token.startswith("sso="):
-            token = token[4:]
-
+        attempted_tokens: set[str] = set()
         think = {"enabled": True, "disabled": False}.get(thinking)
         is_stream = stream if stream is not None else get_config("chat.stream")
 
@@ -363,57 +355,98 @@ class VideoService:
         except ValueError as e:
             raise ValidationException(str(e))
 
-        # 处理图片附件
-        image_urls = []
-        if attachments:
-            upload_service = UploadService()
+        while True:
+            token_info = token_mgr.get_token_for_video(
+                resolution=resolution,
+                video_length=video_length,
+                pool_candidates=pool_candidates,
+                exclude_tokens=attempted_tokens,
+            )
+
+            if not token_info:
+                break
+
+            token = token_info.token
+            if token.startswith("sso="):
+                token = token[4:]
+            attempted_tokens.add(token)
+
             try:
-                for attach_type, attach_data in attachments:
-                    if attach_type == "image":
-                        _, file_uri = await upload_service.upload(attach_data, token)
-                        image_url = f"https://assets.grok.com/{file_uri}"
-                        image_urls.append(image_url)
-                        logger.info(f"Image uploaded for video: {image_url}")
-            finally:
-                await upload_service.close()
+                image_urls = []
+                if attachments:
+                    upload_service = UploadService()
+                    try:
+                        for attach_type, attach_data in attachments:
+                            if attach_type == "image":
+                                _, file_uri = await upload_service.upload(
+                                    attach_data,
+                                    token,
+                                )
+                                image_url = f"https://assets.grok.com/{file_uri}"
+                                image_urls.append(image_url)
+                                logger.info(f"Image uploaded for video: {image_url}")
+                    finally:
+                        await upload_service.close()
 
-        # 生成视频
-        service = VideoService()
-        if image_urls:
-            response = await service.generate_from_image(
-                token,
-                prompt,
-                image_urls,
-                aspect_ratio,
-                video_length,
-                resolution,
-                preset,
-            )
-        else:
-            response = await service.generate(
-                token, prompt, aspect_ratio, video_length, resolution, preset
-            )
+                service = VideoService()
+                if image_urls:
+                    response = await service.generate_from_image(
+                        token,
+                        prompt,
+                        image_urls,
+                        aspect_ratio,
+                        video_length,
+                        resolution,
+                        preset,
+                    )
+                else:
+                    response = await service.generate(
+                        token,
+                        prompt,
+                        aspect_ratio,
+                        video_length,
+                        resolution,
+                        preset,
+                    )
 
-        # 处理响应
-        if is_stream:
-            processor = VideoStreamProcessor(model, token, think)
-            return wrap_stream_with_usage(
-                processor.process(response), token_mgr, token, model
-            )
+                if is_stream:
+                    processor = VideoStreamProcessor(model, token, think)
+                    return wrap_stream_with_usage(
+                        processor.process(response), token_mgr, token, model
+                    )
 
-        result = await VideoCollectProcessor(model, token).process(response)
-        try:
-            model_info = ModelService.get(model)
-            effort = (
-                EffortType.HIGH
-                if (model_info and model_info.cost.value == "high")
-                else EffortType.LOW
-            )
-            await token_mgr.consume(token, effort)
-            logger.debug(f"Video completed, recorded usage (effort={effort.value})")
-        except Exception as e:
-            logger.warning(f"Failed to record video usage: {e}")
-        return result
+                result = await VideoCollectProcessor(model, token).process(response)
+                try:
+                    model_info = ModelService.get(model)
+                    effort = (
+                        EffortType.HIGH
+                        if (model_info and model_info.cost.value == "high")
+                        else EffortType.LOW
+                    )
+                    await token_mgr.consume(token, effort)
+                    logger.debug(
+                        f"Video completed, recorded usage (effort={effort.value})"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to record video usage: {e}")
+                return result
+
+            except (AppException, UpstreamException) as exc:
+                status = VideoService._extract_status(exc)
+                if status not in (401, 403, 429):
+                    raise
+                await token_mgr.record_fail(token, status, str(exc))
+                logger.warning(
+                    f"Video token failed: model={model}, token={token[:10]}..., "
+                    f"status={status}, trying next token"
+                )
+
+        raise AppException(
+            message="No available tokens. Please try again later.",
+            error_type=ErrorType.RATE_LIMIT.value,
+            code="rate_limit_exceeded",
+            status_code=429,
+        )
 
 
 __all__ = ["VideoService"]

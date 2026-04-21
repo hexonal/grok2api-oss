@@ -10,6 +10,7 @@ from app.services.token.models import (
     TokenInfo,
     EffortType,
     FAIL_THRESHOLD,
+    RATE_LIMIT_STATUS_CODES,
     TokenStatus,
     BASIC__DEFAULT_QUOTA,
     SUPER_DEFAULT_QUOTA,
@@ -254,6 +255,7 @@ class TokenManager:
         resolution: str = "480p",
         video_length: int = 6,
         pool_candidates: Optional[List[str]] = None,
+        exclude_tokens: Optional[set[str]] = None,
     ) -> Optional["TokenInfo"]:
         """
         根据视频需求智能选择 Token 池
@@ -267,6 +269,7 @@ class TokenManager:
             resolution: 视频分辨率 ("480p" 或 "720p")
             video_length: 视频时长(秒)
             pool_candidates: 候选 Token 池（按优先级）
+            exclude_tokens: 本次请求已尝试失败的 Token
 
         Returns:
             TokenInfo 对象或 None（无可用 token）
@@ -285,7 +288,7 @@ class TokenManager:
             ordered_pools = [primary_pool, fallback_pool]
 
         for idx, pool_name in enumerate(ordered_pools):
-            token_info = self.get_token_info(pool_name)
+            token_info = self.get_token_info(pool_name, exclude_tokens=exclude_tokens)
             if token_info:
                 if idx == 0:
                     logger.info(
@@ -436,12 +439,18 @@ class TokenManager:
         for pool in self.pools.values():
             token = pool.get(raw_token)
             if token:
-                if status_code in (401, 403):
+                if status_code in (401, 403) or status_code in RATE_LIMIT_STATUS_CODES:
                     token.record_fail(status_code, reason)
-                    logger.warning(
-                        f"Token {raw_token[:10]}...: recorded {status_code} failure "
-                        f"({token.fail_count}/{FAIL_THRESHOLD}) - {reason}"
-                    )
+                    if status_code in RATE_LIMIT_STATUS_CODES:
+                        logger.warning(
+                            f"Token {raw_token[:10]}...: recorded {status_code} rate limit, "
+                            f"marked cooling - {reason}"
+                        )
+                    else:
+                        logger.warning(
+                            f"Token {raw_token[:10]}...: recorded {status_code} failure "
+                            f"({token.fail_count}/{FAIL_THRESHOLD}) - {reason}"
+                        )
                 else:
                     logger.info(
                         f"Token {raw_token[:10]}...: non-auth error ({status_code}) - {reason} (not counted)"
