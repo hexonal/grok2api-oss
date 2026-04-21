@@ -811,48 +811,78 @@ async def create_image(request: ImageGenerationRequest):
         expected_per_call = 6
         calls_needed = max(1, math.ceil(n / expected_per_call))
         calls_needed = min(calls_needed, n)
+        attempted_tokens: set[str] = set()
+        current_token = token
 
-        async def _fetch_batch(call_target: int):
-            upstream = image_service.stream(
-                token=token,
-                prompt=request.prompt,
-                aspect_ratio=aspect_ratio,
-                n=call_target,
-                enable_nsfw=enable_nsfw,
-            )
-            processor = ImageWSCollectProcessor(
-                model_info.model_id,
-                token,
-                n=call_target,
-                response_format=response_format,
-            )
-            return await processor.process(upstream)
+        while current_token:
+            current_rate_limited = False
 
-        tasks = []
-        for i in range(calls_needed):
-            remaining = n - (i * expected_per_call)
-            call_target = min(expected_per_call, remaining)
-            tasks.append(_fetch_batch(call_target))
+            async def _fetch_batch(call_target: int):
+                upstream = image_service.stream(
+                    token=current_token,
+                    prompt=request.prompt,
+                    aspect_ratio=aspect_ratio,
+                    n=call_target,
+                    enable_nsfw=enable_nsfw,
+                )
+                processor = ImageWSCollectProcessor(
+                    model_info.model_id,
+                    current_token,
+                    n=call_target,
+                    response_format=response_format,
+                )
+                return await processor.process(upstream)
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for batch in results:
-            if isinstance(batch, Exception):
-                logger.warning(f"WS batch failed: {batch}")
-                if _is_rate_limit_error(batch):
-                    rate_limited = True
-                continue
-            for img in batch:
-                if img not in seen:
-                    seen.add(img)
-                    all_images.append(img)
+            tasks = []
+            for i in range(calls_needed):
+                remaining = n - (i * expected_per_call)
+                call_target = min(expected_per_call, remaining)
+                tasks.append(_fetch_batch(call_target))
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for batch in results:
+                if isinstance(batch, Exception):
+                    logger.warning(f"WS batch failed: {batch}")
+                    if _is_rate_limit_error(batch):
+                        current_rate_limited = True
+                    continue
+                for img in batch:
+                    if img not in seen:
+                        seen.add(img)
+                        all_images.append(img)
+                    if len(all_images) >= n:
+                        break
                 if len(all_images) >= n:
                     break
-            if len(all_images) >= n:
+
+            if all_images:
+                try:
+                    await token_mgr.consume(current_token, _get_effort(model_info))
+                except Exception as e:
+                    logger.warning(f"Failed to consume token: {e}")
                 break
-        try:
-            await token_mgr.consume(token, _get_effort(model_info))
-        except Exception as e:
-            logger.warning(f"Failed to consume token: {e}")
+
+            if not current_rate_limited:
+                break
+
+            rate_limited = True
+            limited_token = current_token
+            await token_mgr.record_fail(
+                limited_token,
+                429,
+                "Image WebSocket rate limit exceeded",
+            )
+            attempted_tokens.add(_raw_token(limited_token))
+            current_token = _select_model_token(
+                token_mgr,
+                model_info.model_id,
+                attempted_tokens,
+            )
+            if current_token:
+                logger.warning(
+                    f"Image WS token rate limited: token={limited_token[:10]}..., "
+                    f"trying next token={current_token[:10]}..."
+                )
         usage_override = {
             "total_tokens": 0,
             "input_tokens": 0,
