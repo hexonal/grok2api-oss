@@ -50,6 +50,7 @@ GROK_DEFAULTS = {
         "image_ws_final_min_bytes": 100000,
         "image_ws_medium_min_bytes": 30000,
         "image_ws_max_token_attempts": 12,
+        "image_ws_basic_pool_rate_limit_fallback_threshold": 4,
         "image_ws_circuit_breaker_threshold": 3,
         "image_ws_circuit_breaker_seconds": 300,
     },

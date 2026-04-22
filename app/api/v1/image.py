@@ -367,9 +367,15 @@ def _raw_token(token: str) -> str:
     return token[4:] if token.startswith("sso=") else token
 
 
-def _select_model_token(token_mgr, model: str, exclude_tokens: Optional[set[str]] = None):
+def _select_model_token(
+    token_mgr,
+    model: str,
+    exclude_tokens: Optional[set[str]] = None,
+    pool_candidates: Optional[List[str]] = None,
+):
     """按模型候选池选择可用 token"""
-    for pool_name in ModelService.pool_candidates_for_model(model):
+    candidates = pool_candidates or ModelService.pool_candidates_for_model(model)
+    for pool_name in candidates:
         token = token_mgr.get_token(pool_name, exclude_tokens=exclude_tokens)
         if token:
             return token
@@ -383,6 +389,18 @@ def _resolve_token_pool(token_mgr, token: str) -> Optional[str]:
         if pool.get(raw_token):
             return pool_name
     return None
+
+
+def _pool_has_available_token(
+    token_mgr,
+    pool_name: str,
+    exclude_tokens: Optional[set[str]] = None,
+) -> bool:
+    """检查目标池是否还有可尝试 token。"""
+    pool = token_mgr.pools.get(pool_name)
+    if not pool:
+        return False
+    return pool.select(exclude_tokens=exclude_tokens) is not None
 
 
 async def _get_token(model: str, exclude_tokens: Optional[set[str]] = None):
@@ -473,6 +491,14 @@ def _config_float(key: str, default: float, minimum: float = 0.0) -> float:
 
 def _image_ws_max_token_attempts() -> int:
     return _config_int("image.image_ws_max_token_attempts", 12, 1)
+
+
+def _image_ws_basic_pool_rate_limit_fallback_threshold() -> int:
+    return _config_int(
+        "image.image_ws_basic_pool_rate_limit_fallback_threshold",
+        4,
+        0,
+    )
 
 
 def _image_ws_circuit_open(model_id: str) -> bool:
@@ -917,7 +943,12 @@ async def create_image(request: ImageGenerationRequest):
         calls_needed = min(calls_needed, n)
         attempted_tokens: set[str] = set()
         current_token = token
+        candidate_pools = ModelService.pool_candidates_for_model(model_info.model_id)
         max_token_attempts = _image_ws_max_token_attempts()
+        basic_pool_fallback_threshold = (
+            _image_ws_basic_pool_rate_limit_fallback_threshold()
+        )
+        basic_rate_limited_attempts = 0
         token_attempts = 0
 
         while current_token and token_attempts < max_token_attempts:
@@ -978,6 +1009,7 @@ async def create_image(request: ImageGenerationRequest):
                 break
 
             limited_token = current_token
+            limited_pool = _resolve_token_pool(token_mgr, limited_token) or "unknown"
             if current_rate_limited:
                 rate_limited = True
                 await token_mgr.record_fail(
@@ -985,6 +1017,27 @@ async def create_image(request: ImageGenerationRequest):
                     429,
                     "Image WebSocket rate limit exceeded",
                 )
+                if (
+                    limited_pool == "ssoBasic"
+                    and basic_pool_fallback_threshold > 0
+                    and candidate_pools[:1] == ["ssoBasic"]
+                    and "ssoSuper" in candidate_pools
+                    and _pool_has_available_token(
+                        token_mgr,
+                        "ssoSuper",
+                        attempted_tokens,
+                    )
+                ):
+                    basic_rate_limited_attempts += 1
+                    if basic_rate_limited_attempts >= basic_pool_fallback_threshold:
+                        candidate_pools = [
+                            pool for pool in candidate_pools if pool != "ssoBasic"
+                        ]
+                        logger.warning(
+                            "Image WS basic pool rate limited repeatedly: "
+                            f"model={model_info.model_id}, threshold={basic_pool_fallback_threshold}, "
+                            f"falling back to pools={candidate_pools}"
+                        )
             else:
                 await token_mgr.record_fail(
                     limited_token,
@@ -997,6 +1050,7 @@ async def create_image(request: ImageGenerationRequest):
                 token_mgr,
                 model_info.model_id,
                 attempted_tokens,
+                candidate_pools,
             )
             if current_token and token_attempts < max_token_attempts:
                 next_pool = _resolve_token_pool(token_mgr, current_token) or "unknown"

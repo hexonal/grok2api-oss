@@ -191,6 +191,72 @@ def test_create_image_ws_routes_to_next_token_after_429(monkeypatch):
     asyncio.run(_run())
 
 
+def test_create_image_ws_falls_back_to_super_after_basic_rate_limit_threshold(monkeypatch):
+    async def _run():
+        _clear_image_ws_circuit()
+        manager = TokenManager()
+
+        basic_pool = TokenPool("ssoBasic")
+        basic_pool.add(TokenInfo(token="limited-basic-0", quota=80))
+        basic_pool.add(TokenInfo(token="limited-basic-1", quota=79))
+        basic_pool.add(TokenInfo(token="limited-basic-2", quota=78))
+
+        super_pool = TokenPool("ssoSuper")
+        super_pool.add(TokenInfo(token="good-super", quota=140))
+
+        manager.pools = {
+            "ssoBasic": basic_pool,
+            "ssoSuper": super_pool,
+        }
+        manager._schedule_save = lambda: None  # type: ignore[method-assign]
+
+        calls: list[str] = []
+
+        def fake_stream(token, **kwargs):
+            async def stream():
+                calls.append(token)
+                if token.startswith("limited-basic"):
+                    yield {
+                        "type": "error",
+                        "error_code": "rate_limit_exceeded",
+                        "error": "Image rate limit exceeded",
+                    }
+                    return
+
+                yield {
+                    "type": "image",
+                    "image_id": "img-1",
+                    "stage": "final",
+                    "blob": "data:image/jpeg;base64,ZmFrZS1pbWFnZQ==",
+                    "blob_size": 256,
+                    "url": "https://assets.grok.com/generated/img-1.jpg",
+                    "is_final": True,
+                }
+
+            return stream()
+
+        _patch_image_ws(
+            monkeypatch,
+            manager,
+            fake_stream,
+            {
+                "image.image_ws_max_token_attempts": 5,
+                "image.image_ws_basic_pool_rate_limit_fallback_threshold": 2,
+            },
+        )
+
+        response = await _create_image_ws()
+        payload = json.loads(response.body)
+
+        assert calls == ["limited-basic-0", "limited-basic-1", "good-super"]
+        assert basic_pool.get("limited-basic-0").status == TokenStatus.COOLING
+        assert basic_pool.get("limited-basic-1").status == TokenStatus.COOLING
+        assert basic_pool.get("limited-basic-2").status == TokenStatus.ACTIVE
+        assert payload["data"][0]["b64_json"] == "ZmFrZS1pbWFnZQ=="
+
+    asyncio.run(_run())
+
+
 def test_create_image_ws_stops_after_configured_token_attempts(monkeypatch):
     async def _run():
         _clear_image_ws_circuit()
