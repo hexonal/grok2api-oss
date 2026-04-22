@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from app.core.logger import logger
+from app.core.exceptions import UpstreamException
 from app.services.token.models import (
     TokenInfo,
     EffortType,
@@ -14,6 +15,7 @@ from app.services.token.models import (
     TokenStatus,
     BASIC__DEFAULT_QUOTA,
     SUPER_DEFAULT_QUOTA,
+    AUTH_FAIL_FAST_STATUS_CODES,
 )
 from app.core.storage import get_storage
 from app.core.config import get_config
@@ -29,6 +31,9 @@ DEFAULT_SAVE_DELAY_MS = 500
 
 SUPER_POOL_NAME = "ssoSuper"
 BASIC_POOL_NAME = "ssoBasic"
+USAGE_SYNC_FAILURE_STATUS_CODES = {401}.union(
+    AUTH_FAIL_FAST_STATUS_CODES, RATE_LIMIT_STATUS_CODES
+)
 
 
 def _default_quota_for_pool(pool_name: str) -> int:
@@ -44,6 +49,26 @@ def _describe_token_for_log(token_info: TokenInfo) -> str:
     if note:
         return f"token={masked}, note={note}"
     return f"token={masked}"
+
+
+def _extract_upstream_status_code(error: Exception) -> Optional[int]:
+    """从上游异常中提取 HTTP 状态码。"""
+    if isinstance(error, UpstreamException):
+        details = error.details or {}
+        if isinstance(details, dict):
+            status = details.get("status")
+            if isinstance(status, int):
+                return status
+            if isinstance(status, str) and status.isdigit():
+                return int(status)
+
+    error_str = str(error)
+    if "Unauthorized" in error_str:
+        return 401
+    for status_code in sorted(USAGE_SYNC_FAILURE_STATUS_CODES):
+        if f"{status_code}" in error_str:
+            return status_code
+    return None
 
 
 class TokenManager:
@@ -406,6 +431,16 @@ class TokenManager:
                 return True
 
         except Exception as e:
+            status_code = _extract_upstream_status_code(e)
+            if status_code in USAGE_SYNC_FAILURE_STATUS_CODES:
+                target_token.record_fail(status_code, str(e))
+                target_token.mark_synced()
+                self._schedule_save()
+                logger.warning(
+                    f"Token {raw_token[:10]}...: usage sync failed with status {status_code}, "
+                    f"updated status to {target_token.status}"
+                )
+                return False
             logger.warning(
                 f"Token {raw_token[:10]}...: API sync failed, fallback to local ({e})"
             )
@@ -718,10 +753,9 @@ class TokenManager:
                         return {"recovered": False, "expired": False}
 
                     except Exception as e:
-                        error_str = str(e)
+                        status_code = _extract_upstream_status_code(e)
 
-                        # 检查是否为 401 错误
-                        if "401" in error_str or "Unauthorized" in error_str:
+                        if status_code == 401:
                             if retry < 2:
                                 logger.warning(
                                     f"Token {token_info.token[:10]}...: 401 error, "
@@ -735,15 +769,37 @@ class TokenManager:
                                     f"Token {token_info.token[:10]}...: 401 after 2 retries, "
                                     f"marking as expired"
                                 )
+                                token_info.record_fail(401, str(e))
+                                token_info.fail_count = max(
+                                    token_info.fail_count, FAIL_THRESHOLD
+                                )
                                 token_info.status = TokenStatus.EXPIRED
                                 token_info.mark_synced()
                                 return {"recovered": False, "expired": True}
-                        else:
-                            logger.warning(
-                                f"Token {token_info.token[:10]}...: refresh failed ({e})"
+
+                        if status_code in AUTH_FAIL_FAST_STATUS_CODES:
+                            logger.error(
+                                f"Token {token_info.token[:10]}...: refresh failed with status {status_code}, "
+                                f"marking as expired"
                             )
+                            token_info.record_fail(status_code, str(e))
+                            token_info.mark_synced()
+                            return {"recovered": False, "expired": True}
+
+                        if status_code in RATE_LIMIT_STATUS_CODES:
+                            logger.warning(
+                                f"Token {token_info.token[:10]}...: refresh hit status {status_code}, "
+                                f"keeping cooling state"
+                            )
+                            token_info.record_fail(status_code, str(e))
                             token_info.mark_synced()
                             return {"recovered": False, "expired": False}
+
+                        logger.warning(
+                            f"Token {token_info.token[:10]}...: refresh failed ({e})"
+                        )
+                        token_info.mark_synced()
+                        return {"recovered": False, "expired": False}
 
                 token_info.mark_synced()
                 return {"recovered": False, "expired": False}

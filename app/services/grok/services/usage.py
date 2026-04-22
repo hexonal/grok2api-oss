@@ -115,6 +115,12 @@ class UsageService:
 
                     if response.status_code == 200:
                         data = response.json()
+                        if (
+                            isinstance(data, dict)
+                            and "remainingTokens" not in data
+                            and "remainingQueries" in data
+                        ):
+                            data["remainingTokens"] = data["remainingQueries"]
                         remaining = data.get("remainingTokens", 0)
                         logger.info(
                             f"Usage sync success: remaining={remaining}, token={token[:10]}..."
