@@ -237,6 +237,62 @@ def test_create_image_ws_stops_after_configured_token_attempts(monkeypatch):
     asyncio.run(_run())
 
 
+def test_create_image_ws_uses_expanded_default_attempt_budget(monkeypatch):
+    async def _run():
+        _clear_image_ws_circuit()
+        manager = _new_manager_with_basic_tokens(
+            [
+                ("limited-0", 80),
+                ("limited-1", 79),
+                ("limited-2", 78),
+                ("limited-3", 77),
+                ("limited-4", 76),
+            ]
+        )
+        calls: list[str] = []
+
+        def fake_stream(token, **kwargs):
+            async def stream():
+                calls.append(token)
+                yield {
+                    "type": "error",
+                    "error_code": "rate_limit_exceeded",
+                    "error": "Image rate limit exceeded",
+                }
+
+            return stream()
+
+        _patch_image_ws(
+            monkeypatch,
+            manager,
+            fake_stream,
+            {"image.image_ws_max_token_attempts": None},
+        )
+
+        try:
+            await _create_image_ws()
+        except AppException as exc:
+            assert exc.status_code == 429
+            assert exc.code == "rate_limit_exceeded"
+        else:
+            raise AssertionError("expected rate limit error")
+
+        basic_pool = manager.pools["ssoBasic"]
+        assert calls == [
+            "limited-0",
+            "limited-1",
+            "limited-2",
+            "limited-3",
+            "limited-4",
+        ]
+        assert all(
+            basic_pool.get(token).status == TokenStatus.COOLING
+            for token in calls
+        )
+
+    asyncio.run(_run())
+
+
 def test_create_image_ws_circuit_breaker_skips_upstream_calls(monkeypatch):
     async def _run():
         _clear_image_ws_circuit()
@@ -279,9 +335,18 @@ def test_create_image_ws_circuit_breaker_skips_upstream_calls(monkeypatch):
             else:
                 raise AssertionError("expected rate limit error")
 
-        assert calls == ["limited-0", "limited-1"]
-        assert manager.pools["ssoBasic"].get("limited-2").status == TokenStatus.ACTIVE
-        assert manager.pools["ssoBasic"].get("limited-3").status == TokenStatus.ACTIVE
+        try:
+            await _create_image_ws()
+        except AppException as exc:
+            assert exc.status_code == 429
+        else:
+            raise AssertionError("expected rate limit error")
+
+        assert calls == ["limited-0", "limited-1", "limited-2", "limited-3"]
+        assert manager.pools["ssoBasic"].get("limited-0").status == TokenStatus.COOLING
+        assert manager.pools["ssoBasic"].get("limited-1").status == TokenStatus.COOLING
+        assert manager.pools["ssoBasic"].get("limited-2").status == TokenStatus.COOLING
+        assert manager.pools["ssoBasic"].get("limited-3").status == TokenStatus.COOLING
 
     asyncio.run(_run())
 
